@@ -17,14 +17,18 @@ class Mesh:
     faces: torch.Tensor
 
     def normalized(self) -> "Mesh":
-        # Keep different meshes in a consistent scale range for renderer and optimization stability.
+        # Keep different meshes in a consistent scale range for renderer and
+        # optimization stability. Without this, learning rates and splat sizes
+        # would need retuning per mesh.
         centered = self.vertices - self.vertices.mean(dim=0, keepdim=True)
         scale = centered.norm(dim=-1).amax().clamp_min(1e-6)
         return Mesh(centered / scale, self.faces)
 
 
 def load_obj_mesh(path: str | Path, device: torch.device) -> Mesh:
-    # Minimal OBJ loader: enough for triangle meshes exported by common reconstruction tools.
+    # Minimal OBJ loader: enough for triangle meshes exported by common
+    # reconstruction tools. The code intentionally ignores materials and other
+    # rich OBJ features because the hybrid baseline only needs geometry.
     vertices = []
     faces = []
     with Path(path).open("r", encoding="utf-8") as handle:
@@ -50,6 +54,7 @@ def load_obj_mesh(path: str | Path, device: torch.device) -> Mesh:
 
 
 def create_cube_mesh(device: torch.device) -> Mesh:
+    # Primitive fallback used when no real mesh is available.
     vertices = torch.tensor(
         [
             [-1.0, -1.0, -1.0],
@@ -86,6 +91,7 @@ def create_cube_mesh(device: torch.device) -> Mesh:
 
 
 def create_uv_sphere_mesh(device: torch.device, lat_steps: int = 16, lon_steps: int = 24) -> Mesh:
+    # Another primitive fallback, useful for toy experiments.
     vertices: list[list[float]] = []
     for lat in range(lat_steps + 1):
         theta = math.pi * lat / lat_steps
@@ -121,6 +127,7 @@ def create_uv_sphere_mesh(device: torch.device, lat_steps: int = 16, lon_steps: 
 
 
 def create_cone_mesh(device: torch.device, radial_steps: int = 24) -> Mesh:
+    # Simple non-convex-ish primitive for prompts that imply vertical shapes.
     vertices = [[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]
     for index in range(radial_steps):
         angle = (2.0 * math.pi * index) / radial_steps
@@ -140,7 +147,8 @@ def create_cone_mesh(device: torch.device, radial_steps: int = 24) -> Mesh:
 
 
 def primitive_mesh_from_prompt(prompt: str, device: torch.device) -> Mesh:
-    # Synthetic fallback when no explicit geometry prior is available.
+    # Synthetic fallback when no explicit geometry prior is available. This is
+    # only a convenience baseline, not semantic text-to-3D generation.
     lower_prompt = prompt.lower()
     if any(token in lower_prompt for token in ("sphere", "ball", "planet", "orb")):
         return create_uv_sphere_mesh(device)
@@ -150,7 +158,8 @@ def primitive_mesh_from_prompt(prompt: str, device: torch.device) -> Mesh:
 
 
 def sample_surface(mesh: Mesh, num_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
-    # Area-weighted triangle sampling gives anchors distributed over the mesh surface.
+    # Area-weighted triangle sampling gives anchors distributed over the mesh
+    # surface without over-focusing on tiny triangles.
     triangles = mesh.vertices[mesh.faces]
     edges_a = triangles[:, 1] - triangles[:, 0]
     edges_b = triangles[:, 2] - triangles[:, 0]
@@ -174,7 +183,8 @@ def sample_completion_regions(
     mesh: Mesh,
     num_samples: int,
 ) -> tuple[torch.Tensor, torch.Tensor, str]:
-    # Open boundaries are the most likely missing regions, so prioritize them when possible.
+    # Open boundaries are the most likely missing regions, so prioritize them
+    # when possible. If the mesh is closed, fall back to generic surface seeds.
     triangles = mesh.vertices[mesh.faces]
     edges_a = triangles[:, 1] - triangles[:, 0]
     edges_b = triangles[:, 2] - triangles[:, 0]

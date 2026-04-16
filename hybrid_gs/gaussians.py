@@ -19,7 +19,9 @@ PROMPT_PALETTES = {
 
 
 def prompt_palette(prompt: str, device: torch.device) -> torch.Tensor:
-    # The palette is a placeholder appearance prior, not a learned generative model.
+    # The palette is a placeholder appearance prior, not a learned generative
+    # model. It gives the optimizer a gentle color bias when real colors are
+    # missing or sparse.
     lower_prompt = prompt.lower()
     for keyword, palette in PROMPT_PALETTES.items():
         if keyword != "default" and keyword in lower_prompt:
@@ -28,7 +30,9 @@ def prompt_palette(prompt: str, device: torch.device) -> torch.Tensor:
 
 
 def procedural_colors(points: torch.Tensor, normals: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
-    # Cheap initialization used when real colors are not available from COLMAP points.
+    # Cheap initialization used when real colors are not available from COLMAP
+    # points. The rule is intentionally simple: pick a palette color from the
+    # point location and modulate it with normal-based shading.
     indices = (
         (points[:, 0] > 0).long()
         + (points[:, 1] > 0).long()
@@ -42,6 +46,8 @@ def procedural_colors(points: torch.Tensor, normals: torch.Tensor, palette: torc
 
 @dataclass
 class GaussianState:
+    # A plain container for the differentiable Gaussian cloud at one instant in
+    # training. Each branch returns its own state and the full model merges them.
     means: torch.Tensor
     scales: torch.Tensor
     colors: torch.Tensor
@@ -49,6 +55,7 @@ class GaussianState:
 
 
 def concat_states(*states: GaussianState) -> GaussianState:
+    # Merge multiple Gaussian branches into one renderable state.
     return GaussianState(
         means=torch.cat([state.means for state in states], dim=0),
         scales=torch.cat([state.scales for state in states], dim=0),
@@ -68,7 +75,8 @@ class AnchoredGaussianModel(nn.Module):
         jitter: float = 0.03,
     ) -> None:
         super().__init__()
-        # Anchored splats stay close to the structural prior and carry the base appearance.
+        # Anchored splats stay close to the structural prior and carry the base
+        # appearance. They are the most trusted branch in the representation.
         palette = prompt_palette(prompt, anchors.device)
         colors = colors_override if colors_override is not None else procedural_colors(anchors, normals, palette)
         noise = jitter * torch.randn_like(anchors)
@@ -83,6 +91,8 @@ class AnchoredGaussianModel(nn.Module):
         self.opacity_logits = nn.Parameter(torch.full((anchors.shape[0], 1), 0.70, device=anchors.device).logit())
 
     def state(self) -> GaussianState:
+        # Convert unconstrained trainable parameters into physically meaningful
+        # splat properties with simple bounds for stability.
         scales = torch.exp(self.log_scales).clamp(0.01, 0.20)
         colors = torch.sigmoid(self.color_logits)
         opacity = torch.sigmoid(self.opacity_logits).clamp(0.02, 0.98)
@@ -112,7 +122,8 @@ class HybridGaussianModel(nn.Module):
         completion_offset: float = 0.10,
     ) -> None:
         super().__init__()
-        # The hybrid model separates trusted structure, local detail, and speculative completion.
+        # The hybrid model separates trusted structure, local detail, and
+        # speculative completion so each branch can be regularized differently.
 
         self.anchored = AnchoredGaussianModel(
             anchors=anchors,
@@ -131,7 +142,8 @@ class HybridGaussianModel(nn.Module):
 
         detail_outward = detail_offset * detail_normals
         detail_random_walk = detail_jitter * torch.randn_like(detail_anchors)
-        # Detail splats are allowed small deviations around the prior surface.
+        # Detail splats are allowed small deviations around the prior surface
+        # because they are meant to capture residual appearance or geometry.
         self.register_buffer("detail_anchor_positions", detail_anchors)
         self.register_buffer("detail_anchor_normals", detail_normals)
 
@@ -146,7 +158,9 @@ class HybridGaussianModel(nn.Module):
 
         outward = completion_offset * completion_normals
         random_walk = completion_jitter * torch.randn_like(completion_seeds)
-        # Completion splats start farther from the prior because they are meant to explore gaps.
+        # Completion splats start farther from the prior because they are meant
+        # to explore gaps and under-observed regions rather than cling tightly
+        # to existing structure.
         self.register_buffer("completion_seed_positions", completion_seeds)
         self.register_buffer("completion_seed_normals", completion_normals)
 
@@ -172,6 +186,7 @@ class HybridGaussianModel(nn.Module):
         return self.anchored.palette
 
     def anchored_state(self) -> GaussianState:
+        # Expose each branch separately for branch-specific losses and logging.
         return self.anchored.state()
 
     def detail_state(self) -> GaussianState:
@@ -197,6 +212,8 @@ class HybridGaussianModel(nn.Module):
         )
 
     def state(self) -> GaussianState:
+        # The renderer only understands one flat cloud, so combine the branches
+        # right before rendering.
         return concat_states(
             self.anchored_state(),
             self.detail_state(),

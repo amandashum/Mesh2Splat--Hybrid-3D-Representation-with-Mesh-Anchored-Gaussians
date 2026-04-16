@@ -14,8 +14,10 @@ def render_gaussians(
     tile_size: int | None = None,
     return_alpha: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    # This is an intentionally simple differentiable splat renderer. It is useful for experiments,
-    # but it is much less sophisticated than optimized 3DGS renderers from the literature.
+    # This is an intentionally simple differentiable splat renderer. It is
+    # useful for experiments, but it is much less sophisticated than optimized
+    # 3DGS renderers from the literature: Gaussians are isotropic in screen
+    # space, compositing is brute-force, and visibility handling is simple.
     device = state.means.device
     image_width = camera.width
     image_height = camera.height
@@ -27,6 +29,7 @@ def render_gaussians(
     depth = camera_points[:, 2]
     valid = depth > near_plane
     if not torch.any(valid):
+        # If nothing projects in front of the camera, return the background.
         return (image, alpha_image) if return_alpha else image
 
     points = camera_points[valid]
@@ -35,6 +38,8 @@ def render_gaussians(
     scales = state.scales[valid]
 
     order = torch.argsort(points[:, 2], descending=True)
+
+    # Sort back-to-front so the simple alpha compositing behaves sensibly.
     points = points[order]
     colors = colors[order]
     opacity = opacity[order]
@@ -46,8 +51,9 @@ def render_gaussians(
         0.7,
         max(image_width, image_height) * 0.2,
     )
-    # Use a conservative screen-space footprint so each tile only considers splats
-    # whose projected support overlaps that tile.
+
+    # Use a conservative screen-space footprint so each tile only considers
+    # splats whose projected support overlaps that tile.
     footprint_radius = 3.0 * sigma
     min_x = projected_x - footprint_radius
     max_x = projected_x + footprint_radius
@@ -55,7 +61,10 @@ def render_gaussians(
     max_y = projected_y + footprint_radius
 
     effective_tile_size = tile_size if tile_size and tile_size > 0 else max(image_width, image_height)
-    # Tiling lowers peak memory use. Per-tile culling avoids looping over splats that cannot affect a tile.
+    
+    # Tiling lowers peak memory use. Per-tile culling avoids looping over
+    # splats that cannot affect a tile, which is especially important for
+    # scene-mode runs with many real views.
     image_rows: list[torch.Tensor] = []
     alpha_rows: list[torch.Tensor] = []
     for top in range(0, image_height, effective_tile_size):
@@ -78,6 +87,7 @@ def render_gaussians(
                 & (min_y <= (bottom - 1))
             )
             if not torch.any(tile_overlap):
+                # Most splats will miss most tiles; skip those tiles cheaply.
                 row_images.append(tile_image)
                 row_alphas.append(tile_alpha)
                 continue

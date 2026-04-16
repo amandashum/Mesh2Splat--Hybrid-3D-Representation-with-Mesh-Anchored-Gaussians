@@ -13,7 +13,8 @@ from hybrid_gs.camera import Camera
 
 @dataclass
 class ColmapView:
-    # One training image plus its recovered camera model.
+    # One training image plus its recovered camera model. The pipeline uses
+    # this object as the real-data equivalent of a synthetic camera/target pair.
     name: str
     image_path: Path
     camera: Camera
@@ -23,6 +24,9 @@ class ColmapView:
 @dataclass
 class ColmapPointCloud:
     # Sparse scene prior exported by COLMAP, enriched with confidence proxies.
+    # `track_length` is particularly useful because points seen by more images
+    # are usually more reliable anchors than points supported by only one or
+    # two observations.
     xyz: torch.Tensor
     rgb: torch.Tensor
     error: torch.Tensor
@@ -30,6 +34,8 @@ class ColmapPointCloud:
 
 
 def _iter_data_lines(path: Path):
+    # COLMAP text exports include comments and blank lines. This helper keeps
+    # the downstream parsers focused on actual data rows only.
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if line and not line.startswith("#"):
@@ -37,7 +43,8 @@ def _iter_data_lines(path: Path):
 
 
 def _qvec_to_rotation_matrix(qvec: np.ndarray) -> np.ndarray:
-    # COLMAP stores rotations as quaternions in images.txt.
+    # COLMAP stores rotations as quaternions in images.txt. Convert them once
+    # here so the rest of the code can work with matrices directly.
     qw, qx, qy, qz = qvec
     return np.array(
         [
@@ -50,7 +57,9 @@ def _qvec_to_rotation_matrix(qvec: np.ndarray) -> np.ndarray:
 
 
 def _parse_camera_params(model: str, params: list[float]) -> tuple[float, float, float, float]:
-    # Support the common undistorted COLMAP camera models used in exported text scenes.
+    # Support the common undistorted COLMAP camera models used in exported text
+    # scenes. The current pipeline ignores distortion during rendering, so it
+    # expects images that have already been undistorted by COLMAP.
     if model == "SIMPLE_PINHOLE":
         f, cx, cy = params[:3]
         return f, f, cx, cy
@@ -76,7 +85,9 @@ def load_colmap_text_dataset(
     max_views: int | None = None,
     resize_long_edge: int | None = None,
 ) -> list[ColmapView]:
-    # Load real images and camera poses so training can use true multi-view supervision.
+    # Load real images and camera poses so training can use true multi-view
+    # supervision. This path replaces the synthetic orbit-camera fallback used
+    # by the original self-contained baseline.
     model_path = Path(model_dir)
     image_root = Path(image_dir)
     cameras_path = model_path / "cameras.txt"
@@ -109,6 +120,8 @@ def load_colmap_text_dataset(
     image_lines = list(_iter_data_lines(images_path))
     views: list[ColmapView] = []
     for index in range(0, len(image_lines), 2):
+        # COLMAP stores image metadata on one line and the 2D observation list
+        # on the next line. The pipeline only needs the metadata line here.
         parts = image_lines[index].split()
         image_id = int(parts[0])
         qvec = np.array([float(value) for value in parts[1:5]], dtype=np.float32)
@@ -134,6 +147,8 @@ def load_colmap_text_dataset(
             image = image.resize((width, height), Resampling.BILINEAR)
 
         if resize_long_edge and max(width, height) > resize_long_edge:
+            # Downscaling large source images is the main lever for fitting
+            # real scenes into limited GPU memory.
             scale = resize_long_edge / max(width, height)
             resized_width = max(1, int(round(width * scale)))
             resized_height = max(1, int(round(height * scale)))
@@ -172,7 +187,9 @@ def load_colmap_points3d(
     device: torch.device,
     max_points: int | None = None,
 ) -> ColmapPointCloud:
-    # Load sparse 3D points as a lightweight scene prior when no mesh is available.
+    # Load sparse 3D points as a lightweight scene prior when no mesh is
+    # available. This is what enables the scene-mode pipeline to work directly
+    # from a COLMAP reconstruction instead of requiring a cleaned OBJ mesh.
     model_path = Path(model_dir)
     points_path = model_path / "points3D.txt"
     if not points_path.exists():
@@ -206,6 +223,8 @@ def load_colmap_points3d(
 
     centered = xyz - xyz.mean(dim=0, keepdim=True)
     scale = centered.norm(dim=-1).amax().clamp_min(1e-6)
+    # Normalize the point cloud so scenes of very different real-world scales
+    # behave similarly under the same default splat sizes and loss weights.
     xyz = centered / scale
 
     if max_points is not None and max_points > 0 and xyz.shape[0] > max_points:

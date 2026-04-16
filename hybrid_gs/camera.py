@@ -7,13 +7,18 @@ import torch
 
 
 def _normalize(vector: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    # Camera basis construction and normal estimation both rely on normalized
+    # direction vectors; clamp the denominator so degenerate vectors do not
+    # produce NaNs during setup.
     return vector / vector.norm(dim=-1, keepdim=True).clamp_min(eps)
 
 
 @dataclass
 class Camera:
     # Store the world-to-camera transform directly so both synthetic and COLMAP
-    # cameras can share the same renderer interface.
+    # cameras can share the same renderer interface. Intrinsics are stored in
+    # the usual pinhole form (fx, fy, cx, cy) so the renderer can project
+    # Gaussians without caring where the camera came from.
     rotation: torch.Tensor
     translation: torch.Tensor
     width: int
@@ -24,6 +29,9 @@ class Camera:
     cy: float
 
     def world_to_camera(self, points: torch.Tensor) -> torch.Tensor:
+        # Project world-space points into the camera coordinate system expected
+        # by the renderer. `rotation` and `translation` are already world-to-
+        # camera quantities, so this is just an affine transform.
         return points @ self.rotation.T + self.translation.unsqueeze(0)
 
     @property
@@ -41,7 +49,9 @@ def look_at_camera(
     height: int,
     fov_degrees: float,
 ) -> Camera:
-    # Build a simple pinhole camera from eye/target/up parameters for synthetic orbit views.
+    # Build a simple pinhole camera from eye/target/up parameters for synthetic
+    # orbit views. This is only used when no COLMAP reconstruction is
+    # available, so the code favors clarity over completeness.
     forward = _normalize(target - eye)
     right = _normalize(torch.cross(forward, up, dim=0))
     true_up = _normalize(torch.cross(right, forward, dim=0))
@@ -73,6 +83,8 @@ def orbit_cameras(
     device: torch.device,
 ) -> list[Camera]:
     # Synthetic fallback cameras used when no real COLMAP scene is provided.
+    # These cameras circle the origin at a fixed elevation so the baseline can
+    # still train in a self-contained mode.
     elevation = math.radians(elevation_degrees)
     target = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=device)
     up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=device)

@@ -4,7 +4,8 @@ import torch
 
 
 def reconstruction_loss(rendered: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    # Simple photometric objective: robust L1 plus a small MSE term.
+    # Simple photometric objective: robust L1 plus a small MSE term. The L1
+    # part helps with sharper residuals, while the MSE term smooths training.
     l1 = torch.mean(torch.abs(rendered - target))
     mse = torch.mean((rendered - target) ** 2)
     return l1 + 0.25 * mse
@@ -16,7 +17,9 @@ def tether_loss(
     normals: torch.Tensor,
     normal_weight: float = 0.25,
 ) -> torch.Tensor:
-    # Penalize anchored splats for drifting too far from their structural support.
+    # Penalize anchored splats for drifting too far from their structural
+    # support. Tangential drift is punished, but movement along the surface
+    # normal is also regularized so anchors remain tied to the prior.
     offsets = means - anchors
     normal_offsets = (offsets * normals).sum(dim=-1, keepdim=True) * normals
     tangent_offsets = offsets - normal_offsets
@@ -29,7 +32,9 @@ def completion_smoothness_loss(
     normals: torch.Tensor,
     radial_weight: float = 0.05,
 ) -> torch.Tensor:
-    # Completion splats are weakly regularized so they can move, but not arbitrarily.
+    # Completion splats are weakly regularized so they can move, but not
+    # arbitrarily. They should explore uncertain space without immediately
+    # collapsing into noise.
     offsets = means - seeds
     normal_offsets = (offsets * normals).sum(dim=-1, keepdim=True) * normals
     tangent_offsets = offsets - normal_offsets
@@ -43,7 +48,9 @@ def detail_tether_loss(
     tangent_weight: float = 0.20,
     normal_weight: float = 1.0,
 ) -> torch.Tensor:
-    # Detail splats should stay near the prior while still modeling residual appearance variation.
+    # Detail splats should stay near the prior while still modeling residual
+    # appearance variation. They get more freedom tangentially than the
+    # anchored branch, but still remain local.
     offsets = means - anchors
     normal_offsets = (offsets * normals).sum(dim=-1, keepdim=True) * normals
     tangent_offsets = offsets - normal_offsets
@@ -54,14 +61,17 @@ def detail_tether_loss(
 
 
 def appearance_guidance_loss(colors: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
-    # Lightweight proxy for a stronger semantic appearance prior.
+    # Lightweight proxy for a stronger semantic appearance prior. Each splat is
+    # softly encouraged to stay near at least one palette color.
     distances = ((colors.unsqueeze(1) - palette.unsqueeze(0)) ** 2).sum(dim=-1)
     return distances.min(dim=1).values.mean()
 
 
 def scale_regularization(scales: torch.Tensor) -> torch.Tensor:
+    # Prevent splats from expanding indefinitely.
     return scales.mean()
 
 
 def opacity_regularization(opacity: torch.Tensor) -> torch.Tensor:
+    # Encourage opacity values away from the ambiguous 0.5 region.
     return torch.mean(opacity * (1.0 - opacity))

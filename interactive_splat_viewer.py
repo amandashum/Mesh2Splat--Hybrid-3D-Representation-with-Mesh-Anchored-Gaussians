@@ -12,6 +12,8 @@ from hybrid_gs.mesh import load_obj_mesh, primitive_mesh_from_prompt, sample_sur
 
 
 def _load_plotly():
+    # Import Plotly lazily so training runs do not pay for it unless the viewer
+    # is actually requested.
     try:
         import plotly.graph_objects as go
         import plotly.io as pio
@@ -24,6 +26,8 @@ def _load_plotly():
 
 
 def parse_args() -> argparse.Namespace:
+    # The viewer supports both saved Gaussian states and a lightweight fallback
+    # mode that samples splats from a mesh or primitive prompt.
     parser = argparse.ArgumentParser(description="Create an interactive 3D hybrid mesh + Gaussian viewer.")
     parser.add_argument(
         "--state",
@@ -95,6 +99,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_state_from_npz(path: str | Path) -> dict[str, np.ndarray]:
     # Viewer input is the same saved state emitted by the training pipeline.
+    # Keep the required keys explicit so invalid files fail early.
     data = np.load(path)
     required = {"means", "scales", "colors", "opacity"}
     missing = required.difference(data.files)
@@ -111,7 +116,8 @@ def load_state_from_npz(path: str | Path) -> dict[str, np.ndarray]:
 
 
 def build_fallback_state(args: argparse.Namespace) -> dict[str, np.ndarray]:
-    # Allow the viewer to inspect a mesh or primitive even without a trained Gaussian state file.
+    # Allow the viewer to inspect a mesh or primitive even without a trained
+    # Gaussian state file.
     device = torch.device("cpu")
     if args.mesh:
         mesh = load_obj_mesh(args.mesh, device)
@@ -133,13 +139,15 @@ def build_fallback_state(args: argparse.Namespace) -> dict[str, np.ndarray]:
 
 
 def load_metadata(path: str | Path | None) -> dict[str, int | str]:
+    # Metadata is optional so older runs without the sidecar file still load.
     if not path:
         return {}
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def maybe_subsample(state: dict[str, np.ndarray], max_splats: int) -> dict[str, np.ndarray]:
-    # Browsers struggle with very dense point clouds, so cap the viewer payload when needed.
+    # Browsers struggle with very dense point clouds, so cap the viewer payload
+    # when needed by keeping the most opaque splats.
     num_splats = state["means"].shape[0]
     if max_splats <= 0 or num_splats <= max_splats:
         return state
@@ -150,6 +158,7 @@ def maybe_subsample(state: dict[str, np.ndarray], max_splats: int) -> dict[str, 
 
 
 def build_wireframe_points(vertices: np.ndarray, faces: np.ndarray) -> tuple[list[float], list[float], list[float]]:
+    # Convert triangle faces into polyline segments for a simple wireframe overlay.
     x_lines: list[float] = []
     y_lines: list[float] = []
     z_lines: list[float] = []
@@ -176,6 +185,7 @@ def _make_branch_trace(
     min_size: float,
     marker_line_color: str,
 ):
+    # Build one Plotly trace per Gaussian branch so the legend can toggle them.
     means = state["means"]
     scales = state["scales"]
     colors = state["colors"].clip(0.0, 1.0)
@@ -227,7 +237,8 @@ def split_state_by_metadata(
     state: dict[str, np.ndarray],
     metadata: dict[str, int | str],
 ) -> list[tuple[str, dict[str, np.ndarray], str]]:
-    # The metadata file tells the viewer where anchored/detail/completion branches begin and end.
+    # The metadata file tells the viewer where anchored/detail/completion
+    # branches begin and end within the flat saved state arrays.
     anchored_count = int(metadata.get("anchored_splats", 0))
     detail_count = int(metadata.get("detail_splats", 0))
     completion_count = int(metadata.get("completion_splats", 0))
@@ -261,7 +272,8 @@ def state_to_figure(
     mesh_opacity: float,
     show_wireframe: bool,
 ):
-    # Build a self-contained Plotly scene so results can be inspected without extra tooling.
+    # Build a self-contained Plotly scene so results can be inspected without
+    # extra tooling. This keeps debugging and demos very lightweight.
     go, _ = _load_plotly()
 
     traces = []
@@ -337,6 +349,8 @@ def state_to_figure(
 
 
 def main() -> None:
+    # The viewer is intentionally simple: load state, optionally cap size, then
+    # write a single standalone HTML file.
     args = parse_args()
     if args.state:
         state = load_state_from_npz(args.state)

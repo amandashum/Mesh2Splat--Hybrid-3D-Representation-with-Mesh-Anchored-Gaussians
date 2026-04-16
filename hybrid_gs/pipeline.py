@@ -67,18 +67,21 @@ class HybridConfig:
 
 
 def set_seed(seed: int) -> None:
+    # Deterministic seeds make small experiments easier to compare.
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
 def save_image(path: Path, image: torch.Tensor) -> None:
+    # Save tensor images in a viewer-friendly format for quick comparisons.
     array = (image.detach().cpu().clamp(0.0, 1.0).numpy() * 255.0).astype(np.uint8)
     Image.fromarray(array).save(path)
 
 
 def save_gaussian_state(path: Path, state: GaussianState) -> None:
-    # Save the learned Gaussian cloud so later tools can inspect or visualize it without retraining.
+    # Save the learned Gaussian cloud so later tools can inspect or visualize
+    # it without retraining.
     np.savez(
         path,
         means=state.means.detach().cpu().numpy(),
@@ -89,17 +92,21 @@ def save_gaussian_state(path: Path, state: GaussianState) -> None:
 
 
 def load_mesh(cfg: HybridConfig) -> Mesh:
+    # Mesh mode either consumes a user-supplied OBJ or falls back to a simple
+    # primitive so the repo remains runnable without external assets.
     if cfg.mesh_path:
         return load_obj_mesh(cfg.mesh_path, cfg.device)
     return primitive_mesh_from_prompt(cfg.prompt, cfg.device)
 
 
 def save_metadata(path: Path, payload: dict[str, int | float | str]) -> None:
+    # Keep a small sidecar file describing the branch split for the viewer.
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
-    # Optional convenience hook so a training run can immediately produce viewer.html.
+    # Optional convenience hook so a training run can immediately produce
+    # `viewer.html` without making the user remember a second command.
     if not cfg.prompt_viewer:
         return
 
@@ -136,7 +143,9 @@ def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
 
 
 def build_proxy_targets(mesh: Mesh, cameras, prompt: str, image_size: int) -> list[torch.Tensor]:
-    # Synthetic targets keep the repo self-contained when no real dataset is provided.
+    # Synthetic targets keep the repo self-contained when no real dataset is
+    # provided. A denser "teacher" cloud is rendered from orbit cameras and the
+    # trainable cloud tries to match those images.
     samples, normals = sample_surface(mesh, 4 * 512)
     palette = prompt_palette(prompt, mesh.vertices.device)
     colors = build_palette_colors(samples, normals, palette)
@@ -150,7 +159,8 @@ def build_proxy_targets(mesh: Mesh, cameras, prompt: str, image_size: int) -> li
 
 
 def build_palette_colors(points: torch.Tensor, normals: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
-    # Smooth palette interpolation gives scene-mode splats a more stable fallback initialization.
+    # Smooth palette interpolation gives scene-mode splats a more stable
+    # fallback initialization than assigning one hard color per point.
     radial = points.norm(dim=-1, keepdim=True)
     vertical = 0.5 * (normals[:, 1:2] + 1.0)
     blend = (0.55 * radial + 0.45 * vertical).clamp(0.0, 0.999)
@@ -167,7 +177,8 @@ def build_palette_colors(points: torch.Tensor, normals: torch.Tensor, palette: t
 
 
 def load_training_views(cfg: HybridConfig, mesh: Mesh) -> tuple[list, list[torch.Tensor], str]:
-    # Switch between real COLMAP supervision and synthetic fallback views.
+    # Switch between real COLMAP supervision and synthetic fallback views. The
+    # rest of the optimizer only sees `(camera, target)` pairs either way.
     if cfg.colmap_model_dir and cfg.colmap_image_dir:
         views = load_colmap_text_dataset(
             model_dir=cfg.colmap_model_dir,
@@ -193,11 +204,13 @@ def load_training_views(cfg: HybridConfig, mesh: Mesh) -> tuple[list, list[torch
 
 
 def estimate_point_normals(points: torch.Tensor, cameras: list) -> torch.Tensor:
-    # Approximate normals from local neighborhoods so sparse COLMAP points can seed oriented splats.
+    # Approximate normals from local neighborhoods so sparse COLMAP points can
+    # seed oriented splats. This is heuristic but good enough for a scene prior.
     if points.shape[0] == 0:
         return points.new_zeros((0, 3))
 
     if cameras:
+        # Face normals outward from the nearest recovered camera when possible.
         camera_centers = []
         for camera in cameras:
             center = -camera.rotation.T @ camera.translation
@@ -215,6 +228,7 @@ def estimate_point_normals(points: torch.Tensor, cameras: list) -> torch.Tensor:
         return outward
 
     with torch.no_grad():
+        # Estimate one PCA normal per point from its nearest neighbors.
         pairwise = torch.cdist(points, points)
         k = min(8, max(points.shape[0] - 1, 1))
         knn = torch.topk(pairwise, k=k + 1, largest=False).indices[:, 1:]
@@ -232,6 +246,8 @@ def estimate_point_normals(points: torch.Tensor, cameras: list) -> torch.Tensor:
 
 
 def _sample_indices_from_weights(num_items: int, sample_count: int, weights: torch.Tensor) -> torch.Tensor:
+    # Shared weighted sampler used to pick anchors/detail/completion seeds from
+    # the sparse COLMAP scene prior.
     if sample_count <= 0:
         return torch.zeros((0,), device=weights.device, dtype=torch.long)
     if num_items == 0:
@@ -246,7 +262,8 @@ def build_scene_prior(
     cfg: HybridConfig,
     cameras: list,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, torch.Tensor]:
-    # Turn the sparse COLMAP cloud into anchored/detail/completion seeds for scene reconstruction.
+    # Turn the sparse COLMAP cloud into anchored/detail/completion seeds for
+    # scene reconstruction. This is the heart of scene mode.
     if not cfg.colmap_model_dir:
         raise ValueError("Scene mode requires --colmap-model-dir.")
 
@@ -259,11 +276,13 @@ def build_scene_prior(
     palette = prompt_palette(cfg.prompt, cfg.device)
 
     anchor_weights = point_cloud.track_length + 1.0 / (1.0 + point_cloud.error)
+    # Reliable, well-supported points become anchored structure.
     anchor_indices = _sample_indices_from_weights(point_cloud.xyz.shape[0], cfg.num_splats, anchor_weights)
     anchors = point_cloud.xyz[anchor_indices]
     anchor_normals = normals[anchor_indices]
 
     detail_weights = (point_cloud.track_length + 1.0) * (1.0 + point_cloud.error.reciprocal().clamp(max=10.0))
+    # Detail points prefer regions that are still trustworthy but potentially richer in variation.
     detail_indices = _sample_indices_from_weights(point_cloud.xyz.shape[0], cfg.num_detail_splats, detail_weights)
     detail_anchors = point_cloud.xyz[detail_indices]
     detail_normals = normals[detail_indices]
@@ -273,7 +292,9 @@ def build_scene_prior(
     camera_centers = torch.stack([-camera.rotation.T @ camera.translation for camera in cameras], dim=0)
     distances = torch.cdist(point_cloud.xyz, camera_centers).amin(dim=1)
     completion_weights = uncertainty * (0.35 + distances / distances.max().clamp_min(1e-8))
-    # Under-supported and far-from-camera points are treated as better candidates for gap completion.
+    # Under-supported and far-from-camera points are treated as better
+    # candidates for gap completion because they are more likely to lie near
+    # missing or weakly observed regions.
     completion_indices = _sample_indices_from_weights(
         point_cloud.xyz.shape[0],
         cfg.num_completion_splats,
@@ -293,6 +314,8 @@ def build_scene_prior(
         view_direction = completion_normals
 
     completion_normals = completion_normals + 0.6 * view_direction
+    # Push completion seeds slightly outward so they do not collapse exactly on
+    # top of the sparse support points from the start.
     completion_normals = completion_normals / completion_normals.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     completion_seeds = completion_base + 0.04 * completion_normals
 
@@ -325,6 +348,7 @@ def sample_detail_anchors(
     normals: torch.Tensor,
     num_detail_splats: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Mesh mode reuses anchored samples for the detail branch by subsampling.
     if num_detail_splats <= 0:
         empty_points = anchors.new_zeros((0, anchors.shape[1]))
         empty_normals = normals.new_zeros((0, normals.shape[1]))
@@ -338,7 +362,8 @@ def sample_detail_anchors(
 
 
 def _load_resized_rgb(path: str | Path, image_size: int) -> torch.Tensor:
-    # Real image supervision is resized into the same square canvas used by the renderer.
+    # Real image supervision is resized into the same square canvas used by the
+    # renderer. This keeps the loss simple at the cost of some distortion.
     image = Image.open(path).convert("RGB").resize((image_size, image_size), Resampling.BILINEAR)
     array = np.asarray(image, dtype=np.float32) / 255.0
     return torch.from_numpy(array)
@@ -368,7 +393,8 @@ def build_mesh_prior(
     cfg: HybridConfig,
     cameras: list,
 ) -> tuple[Mesh | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, torch.Tensor | None]:
-    # Mesh mode and scene mode share the same Gaussian optimizer; they only differ in how seeds are built.
+    # Mesh mode and scene mode share the same Gaussian optimizer; they only
+    # differ in how seeds are built.
     if cfg.scene_mode and cfg.colmap_model_dir:
         (
             anchors,
@@ -414,7 +440,8 @@ def build_mesh_prior(
 
 def optimize(cfg: HybridConfig) -> None:
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    # Real datasets may skip meshes entirely, so use a primitive only as a synthetic fallback.
+    # Real datasets may skip meshes entirely, so use a primitive only as a
+    # synthetic fallback for the target-view loader.
     fallback_mesh = load_mesh(cfg) if not (cfg.scene_mode and cfg.colmap_model_dir) else primitive_mesh_from_prompt(cfg.prompt, cfg.device)
     cameras, targets, view_source = load_training_views(cfg, fallback_mesh)
     (
@@ -458,7 +485,8 @@ def optimize(cfg: HybridConfig) -> None:
 
     for step in range(1, cfg.steps + 1):
         optimizer.zero_grad()
-        # Rebuild the full Gaussian state every step so all three branches train jointly.
+        # Rebuild the full Gaussian state every step so all three branches
+        # train jointly.
         state = model.state()
         anchored_state = model.anchored_state()
         detail_state = model.detail_state()
@@ -517,6 +545,7 @@ def optimize(cfg: HybridConfig) -> None:
         optimizer.step()
 
         if step == 1 or step % max(cfg.steps // 10, 1) == 0 or step == cfg.steps:
+            # Print periodic timing blocks so long scene runs are easier to monitor.
             now = time.perf_counter()
             step_time = now - last_log_time
             total_time = now - start_time
@@ -557,6 +586,8 @@ def optimize(cfg: HybridConfig) -> None:
 
 def parse_args() -> HybridConfig:
     parser = argparse.ArgumentParser(description="Hybrid mesh + Gaussian splatting baseline.")
+    # The CLI keeps both mesh mode and scene mode in one command so experiments
+    # can switch priors without changing scripts.
     parser.add_argument("--prompt", default="stone statue", help="Semantic prompt used for mesh choice and appearance prior.")
     parser.add_argument("--mesh", dest="mesh_path", default=None, help="Optional OBJ mesh path exported from Fantasia3D or another generator.")
     parser.add_argument(
