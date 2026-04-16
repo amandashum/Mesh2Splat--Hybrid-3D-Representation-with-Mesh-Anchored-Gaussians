@@ -12,6 +12,8 @@ def render_gaussians(
     background: tuple[float, float, float] = (1.0, 1.0, 1.0),
     near_plane: float = 0.05,
     tile_size: int | None = None,
+    support_scale: float = 2.0,
+    alpha_threshold: float = 1e-3,
     return_alpha: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     # This is an intentionally simple differentiable splat renderer. It is
@@ -52,9 +54,10 @@ def render_gaussians(
         max(image_width, image_height) * 0.2,
     )
 
-    # Use a conservative screen-space footprint so each tile only considers
-    # splats whose projected support overlaps that tile.
-    footprint_radius = 3.0 * sigma
+    # Use a controllable screen-space footprint so each tile only considers
+    # splats whose projected support overlaps that tile. Smaller support windows
+    # make the renderer more focused and reduce wasted work on far-away splats.
+    footprint_radius = support_scale * sigma
     min_x = projected_x - footprint_radius
     max_x = projected_x + footprint_radius
     min_y = projected_y - footprint_radius
@@ -97,12 +100,28 @@ def render_gaussians(
             tile_sigma = sigma[tile_overlap]
             tile_colors = colors[tile_overlap]
             tile_opacity = opacity[tile_overlap]
+            tile_min_x = min_x[tile_overlap]
+            tile_max_x = max_x[tile_overlap]
+            tile_min_y = min_y[tile_overlap]
+            tile_max_y = max_y[tile_overlap]
 
             for index in range(tile_projected_x.shape[0]):
+                # Skip splats whose clipped support barely touches the tile. This
+                # keeps the renderer focused on the current window rather than
+                # spending work on effectively invisible tails.
+                clipped_left = torch.maximum(tile_min_x[index], torch.tensor(left, device=device, dtype=torch.float32))
+                clipped_right = torch.minimum(tile_max_x[index], torch.tensor(right - 1, device=device, dtype=torch.float32))
+                clipped_top = torch.maximum(tile_min_y[index], torch.tensor(top, device=device, dtype=torch.float32))
+                clipped_bottom = torch.minimum(tile_max_y[index], torch.tensor(bottom - 1, device=device, dtype=torch.float32))
+                if clipped_right <= clipped_left or clipped_bottom <= clipped_top:
+                    continue
+
                 dx = grid_x - tile_projected_x[index]
                 dy = grid_y - tile_projected_y[index]
                 dist2 = (dx * dx + dy * dy) / (tile_sigma[index] * tile_sigma[index] + 1e-6)
                 alpha = tile_opacity[index, 0] * torch.exp(-0.5 * dist2)
+                if torch.amax(alpha) < alpha_threshold:
+                    continue
                 alpha = alpha.clamp(0.0, 0.98).unsqueeze(-1)
                 tile_image = tile_image * (1.0 - alpha) + tile_colors[index].view(1, 1, 3) * alpha
                 tile_alpha = tile_alpha + (1.0 - tile_alpha) * alpha[..., 0]

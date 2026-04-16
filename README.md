@@ -33,6 +33,25 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 python -m pip install -r requirements.txt
 ```
 
+## Reactivate the Environment
+
+If you created the virtual environment in this repository and later open a new
+terminal, reactivate it before running training commands.
+
+In Command Prompt:
+
+```cmd
+cd /d C:\mesh2splat
+.\.venv\Scripts\activate.bat
+```
+
+In PowerShell:
+
+```powershell
+cd C:\mesh2splat
+.\.venv\Scripts\Activate.ps1
+```
+
 ## Run the baseline
 
 Default run:
@@ -95,6 +114,8 @@ Useful controls:
 - `--colmap-image-dir`: folder containing the original or undistorted images
 - `--colmap-resize-long-edge`: downscale cap for COLMAP images during training
 - `--render-tile-size`: split rendering into smaller image tiles to reduce GPU memory use
+- `--render-support-scale`: shrink or expand how far each splat influences a tile in screen space
+- `--render-alpha-threshold`: skip splats whose contribution on a tile is negligible
 - `--scene-mode`: use COLMAP sparse points as the scene prior instead of an OBJ mesh
 - `--max-sparse-points`: cap the sparse COLMAP point cloud used in scene mode
 - `--prompt-viewer`: ask at the end of training whether to generate `viewer.html`
@@ -112,6 +133,33 @@ This repository can train against a COLMAP sparse reconstruction exported to TXT
 5. For scene reconstruction, run `main.py --scene-mode` directly on the sparse model and image folder.
 
 See `COLMAP_SETUP.md` for the Windows setup path and the included `tools/run_colmap.ps1` helper.
+
+## Renderer Tuning
+
+The renderer now focuses work more tightly inside each image tile:
+
+- `--render-tile-size` controls the tile/window size used during rendering
+- `--render-support-scale` controls how many Gaussian standard deviations are treated as "active" support for a tile
+- `--render-alpha-threshold` skips splats whose peak alpha inside a tile is too small to matter
+
+If you need to stay within GPU memory while keeping quality reasonable, a practical pattern is:
+
+```powershell
+python .\main.py `
+  --scene-mode `
+  --colmap-model-dir .\data\room\colmap\sparse_txt `
+  --colmap-image-dir .\data\room\images `
+  --num-views 8 `
+  --num-splats 900 `
+  --num-detail-splats 600 `
+  --num-completion-splats 350 `
+  --steps 80 `
+  --colmap-resize-long-edge 192 `
+  --render-tile-size 64 `
+  --render-support-scale 1.75 `
+  --render-alpha-threshold 0.002 `
+  --out-dir .\outputs\scene_run
+```
 
 ## Inspect a saved result
 
@@ -136,7 +184,7 @@ python .\interactive_splat_viewer.py `
 ## Current limitations
 
 - The renderer uses simple isotropic screen-space splats, not full anisotropic 3DGS covariances.
-- The renderer now uses tile-based culling for memory, but it is still a simple research renderer rather than an optimized 3DGS implementation.
+- The renderer now uses tile-based culling and support-thresholding for memory, but it is still a simple research renderer rather than an optimized 3DGS implementation.
 - The appearance prior is a lightweight prompt palette, not diffusion guidance.
 - If COLMAP is not provided, training targets are synthetic orbit renders.
 - Scene mode uses COLMAP sparse points plus heuristics for normals and completion seeding; it is not yet a learned scene-completion prior.

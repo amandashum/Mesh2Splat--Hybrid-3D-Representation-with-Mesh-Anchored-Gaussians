@@ -50,6 +50,8 @@ class HybridConfig:
     image_size: int
     colmap_resize_long_edge: int | None
     render_tile_size: int | None
+    render_support_scale: float
+    render_alpha_threshold: float
     prompt_viewer: bool
     lr: float
     seed: int
@@ -495,7 +497,13 @@ def optimize(cfg: HybridConfig) -> None:
         reconstruction = torch.zeros((), device=cfg.device)
         mask_loss = torch.zeros((), device=cfg.device)
         for camera, target in zip(cameras, targets):
-            rendered = render_gaussians(state, camera, tile_size=cfg.render_tile_size)
+            rendered = render_gaussians(
+                state,
+                camera,
+                tile_size=cfg.render_tile_size,
+                support_scale=cfg.render_support_scale,
+                alpha_threshold=cfg.render_alpha_threshold,
+            )
             reconstruction = reconstruction + reconstruction_loss(rendered, target)
         reconstruction = reconstruction / len(cameras)
 
@@ -507,6 +515,8 @@ def optimize(cfg: HybridConfig) -> None:
                 state,
                 cameras[0],
                 tile_size=cfg.render_tile_size,
+                support_scale=cfg.render_support_scale,
+                alpha_threshold=cfg.render_alpha_threshold,
                 return_alpha=True,
             )
             reconstruction = reconstruction + reconstruction_loss(reference_render, reference_rgb)
@@ -578,7 +588,13 @@ def optimize(cfg: HybridConfig) -> None:
         },
     )
     for index, (camera, target) in enumerate(zip(cameras, targets)):
-        rendered = render_gaussians(final_state, camera, tile_size=cfg.render_tile_size)
+        rendered = render_gaussians(
+            final_state,
+            camera,
+            tile_size=cfg.render_tile_size,
+            support_scale=cfg.render_support_scale,
+            alpha_threshold=cfg.render_alpha_threshold,
+        )
         save_image(cfg.out_dir / f"view_{index:02d}_render.png", rendered)
         save_image(cfg.out_dir / f"view_{index:02d}_target.png", target)
     maybe_prompt_to_create_viewer(cfg)
@@ -625,6 +641,18 @@ def parse_args() -> HybridConfig:
         help="Tile size for memory-efficient rendering. Set to 0 to disable tiling.",
     )
     parser.add_argument(
+        "--render-support-scale",
+        type=float,
+        default=2.0,
+        help="Projected Gaussian support radius in sigma units. Smaller values keep rendering more focused per tile.",
+    )
+    parser.add_argument(
+        "--render-alpha-threshold",
+        type=float,
+        default=1e-3,
+        help="Skip splats whose peak alpha on a tile is below this threshold.",
+    )
+    parser.add_argument(
         "--prompt-viewer",
         action="store_true",
         help="After training, ask whether to generate viewer.html in the output directory.",
@@ -668,6 +696,8 @@ def parse_args() -> HybridConfig:
         image_size=args.image_size,
         colmap_resize_long_edge=colmap_resize_long_edge,
         render_tile_size=render_tile_size,
+        render_support_scale=args.render_support_scale,
+        render_alpha_threshold=args.render_alpha_threshold,
         prompt_viewer=args.prompt_viewer,
         lr=args.lr,
         seed=args.seed,
