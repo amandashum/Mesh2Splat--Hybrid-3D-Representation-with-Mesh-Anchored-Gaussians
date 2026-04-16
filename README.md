@@ -94,8 +94,10 @@ Useful controls:
 - `--colmap-model-dir`: folder with `cameras.txt` and `images.txt`
 - `--colmap-image-dir`: folder containing the original or undistorted images
 - `--colmap-resize-long-edge`: downscale cap for COLMAP images during training
+- `--render-tile-size`: split rendering into smaller image tiles to reduce GPU memory use
 - `--scene-mode`: use COLMAP sparse points as the scene prior instead of an OBJ mesh
 - `--max-sparse-points`: cap the sparse COLMAP point cloud used in scene mode
+- `--prompt-viewer`: ask at the end of training whether to generate `viewer.html`
 - `--steps`: optimization length
 - `--cpu`: force CPU execution
 
@@ -134,6 +136,7 @@ python .\interactive_splat_viewer.py `
 ## Current limitations
 
 - The renderer uses simple isotropic screen-space splats, not full anisotropic 3DGS covariances.
+- The renderer now uses tile-based culling for memory, but it is still a simple research renderer rather than an optimized 3DGS implementation.
 - The appearance prior is a lightweight prompt palette, not diffusion guidance.
 - If COLMAP is not provided, training targets are synthetic orbit renders.
 - Scene mode uses COLMAP sparse points plus heuristics for normals and completion seeding; it is not yet a learned scene-completion prior.
