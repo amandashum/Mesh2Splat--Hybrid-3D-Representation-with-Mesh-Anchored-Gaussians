@@ -12,7 +12,7 @@ from hybrid_gs.mesh import load_obj_mesh, primitive_mesh_from_prompt, sample_sur
 
 
 def _load_plotly():
-    # Import Plotly lazily so training runs do not pay for it unless the viewer
+    # Import Plotly so training runs do not pay for it unless the viewer
     # is actually requested.
     try:
         import plotly.graph_objects as go
