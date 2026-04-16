@@ -94,6 +94,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_state_from_npz(path: str | Path) -> dict[str, np.ndarray]:
+    # Viewer input is the same saved state emitted by the training pipeline.
     data = np.load(path)
     required = {"means", "scales", "colors", "opacity"}
     missing = required.difference(data.files)
@@ -110,6 +111,7 @@ def load_state_from_npz(path: str | Path) -> dict[str, np.ndarray]:
 
 
 def build_fallback_state(args: argparse.Namespace) -> dict[str, np.ndarray]:
+    # Allow the viewer to inspect a mesh or primitive even without a trained Gaussian state file.
     device = torch.device("cpu")
     if args.mesh:
         mesh = load_obj_mesh(args.mesh, device)
@@ -137,6 +139,7 @@ def load_metadata(path: str | Path | None) -> dict[str, int | str]:
 
 
 def maybe_subsample(state: dict[str, np.ndarray], max_splats: int) -> dict[str, np.ndarray]:
+    # Browsers struggle with very dense point clouds, so cap the viewer payload when needed.
     num_splats = state["means"].shape[0]
     if max_splats <= 0 or num_splats <= max_splats:
         return state
@@ -224,6 +227,7 @@ def split_state_by_metadata(
     state: dict[str, np.ndarray],
     metadata: dict[str, int | str],
 ) -> list[tuple[str, dict[str, np.ndarray], str]]:
+    # The metadata file tells the viewer where anchored/detail/completion branches begin and end.
     anchored_count = int(metadata.get("anchored_splats", 0))
     detail_count = int(metadata.get("detail_splats", 0))
     completion_count = int(metadata.get("completion_splats", 0))
@@ -257,6 +261,7 @@ def state_to_figure(
     mesh_opacity: float,
     show_wireframe: bool,
 ):
+    # Build a self-contained Plotly scene so results can be inspected without extra tooling.
     go, _ = _load_plotly()
 
     traces = []
