@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -452,6 +453,8 @@ def optimize(cfg: HybridConfig) -> None:
         f"Pipeline: {'scene prior' if cfg.scene_mode else 'mesh prior'} -> anchored splats + detail splats + completion splats "
         f"-> refinement -> multi-view render (completion seeds: {completion_strategy}, supervision: {view_source})"
     )
+    start_time = time.perf_counter()
+    last_log_time = start_time
 
     for step in range(1, cfg.steps + 1):
         optimizer.zero_grad()
@@ -514,8 +517,15 @@ def optimize(cfg: HybridConfig) -> None:
         optimizer.step()
 
         if step == 1 or step % max(cfg.steps // 10, 1) == 0 or step == cfg.steps:
+            now = time.perf_counter()
+            step_time = now - last_log_time
+            total_time = now - start_time
             print(
-                f"[{step:04d}/{cfg.steps}] "
+                f"\n\n[{step:03d}/{cfg.steps}]\n"
+                "______________________\n"
+                f"time taken: {step_time:.2f}s\n"
+                f"total time used: {total_time:.2f}s\n"
+                "______________________\n"
                 f"total={total.item():.4f} "
                 f"recon={reconstruction.item():.4f} "
                 f"tether={tether.item():.4f} "
@@ -524,6 +534,7 @@ def optimize(cfg: HybridConfig) -> None:
                 f"appearance={appearance.item():.4f} "
                 f"mask={mask_loss.item():.4f}"
             )
+            last_log_time = now
 
     final_state = model.state()
     save_gaussian_state(cfg.out_dir / "gaussian_state.npz", final_state)
