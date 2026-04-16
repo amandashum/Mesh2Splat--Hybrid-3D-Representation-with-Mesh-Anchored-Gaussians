@@ -14,6 +14,8 @@ def render_gaussians(
     tile_size: int | None = None,
     return_alpha: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    # This is an intentionally simple differentiable splat renderer. It is useful for experiments,
+    # but it is much less sophisticated than optimized 3DGS renderers from the literature.
     device = state.means.device
     image_width = camera.width
     image_height = camera.height
@@ -44,8 +46,16 @@ def render_gaussians(
         0.7,
         max(image_width, image_height) * 0.2,
     )
+    # Use a conservative screen-space footprint so each tile only considers splats
+    # whose projected support overlaps that tile.
+    footprint_radius = 3.0 * sigma
+    min_x = projected_x - footprint_radius
+    max_x = projected_x + footprint_radius
+    min_y = projected_y - footprint_radius
+    max_y = projected_y + footprint_radius
 
     effective_tile_size = tile_size if tile_size and tile_size > 0 else max(image_width, image_height)
+    # Tiling lowers peak memory use. Per-tile culling avoids looping over splats that cannot affect a tile.
     image_rows: list[torch.Tensor] = []
     alpha_rows: list[torch.Tensor] = []
     for top in range(0, image_height, effective_tile_size):
@@ -61,13 +71,30 @@ def render_gaussians(
             tile_image = torch.ones((bottom - top, right - left, 3), device=device, dtype=torch.float32) * background_color
             tile_alpha = torch.zeros((bottom - top, right - left), device=device, dtype=torch.float32)
 
-            for index in range(points.shape[0]):
-                dx = grid_x - projected_x[index]
-                dy = grid_y - projected_y[index]
-                dist2 = (dx * dx + dy * dy) / (sigma[index] * sigma[index] + 1e-6)
-                alpha = opacity[index, 0] * torch.exp(-0.5 * dist2)
+            tile_overlap = (
+                (max_x >= left)
+                & (min_x <= (right - 1))
+                & (max_y >= top)
+                & (min_y <= (bottom - 1))
+            )
+            if not torch.any(tile_overlap):
+                row_images.append(tile_image)
+                row_alphas.append(tile_alpha)
+                continue
+
+            tile_projected_x = projected_x[tile_overlap]
+            tile_projected_y = projected_y[tile_overlap]
+            tile_sigma = sigma[tile_overlap]
+            tile_colors = colors[tile_overlap]
+            tile_opacity = opacity[tile_overlap]
+
+            for index in range(tile_projected_x.shape[0]):
+                dx = grid_x - tile_projected_x[index]
+                dy = grid_y - tile_projected_y[index]
+                dist2 = (dx * dx + dy * dy) / (tile_sigma[index] * tile_sigma[index] + 1e-6)
+                alpha = tile_opacity[index, 0] * torch.exp(-0.5 * dist2)
                 alpha = alpha.clamp(0.0, 0.98).unsqueeze(-1)
-                tile_image = tile_image * (1.0 - alpha) + colors[index].view(1, 1, 3) * alpha
+                tile_image = tile_image * (1.0 - alpha) + tile_colors[index].view(1, 1, 3) * alpha
                 tile_alpha = tile_alpha + (1.0 - tile_alpha) * alpha[..., 0]
 
             row_images.append(tile_image)

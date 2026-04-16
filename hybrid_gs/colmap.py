@@ -13,6 +13,7 @@ from hybrid_gs.camera import Camera
 
 @dataclass
 class ColmapView:
+    # One training image plus its recovered camera model.
     name: str
     image_path: Path
     camera: Camera
@@ -21,6 +22,7 @@ class ColmapView:
 
 @dataclass
 class ColmapPointCloud:
+    # Sparse scene prior exported by COLMAP, enriched with confidence proxies.
     xyz: torch.Tensor
     rgb: torch.Tensor
     error: torch.Tensor
@@ -35,6 +37,7 @@ def _iter_data_lines(path: Path):
 
 
 def _qvec_to_rotation_matrix(qvec: np.ndarray) -> np.ndarray:
+    # COLMAP stores rotations as quaternions in images.txt.
     qw, qx, qy, qz = qvec
     return np.array(
         [
@@ -47,6 +50,7 @@ def _qvec_to_rotation_matrix(qvec: np.ndarray) -> np.ndarray:
 
 
 def _parse_camera_params(model: str, params: list[float]) -> tuple[float, float, float, float]:
+    # Support the common undistorted COLMAP camera models used in exported text scenes.
     if model == "SIMPLE_PINHOLE":
         f, cx, cy = params[:3]
         return f, f, cx, cy
@@ -72,6 +76,7 @@ def load_colmap_text_dataset(
     max_views: int | None = None,
     resize_long_edge: int | None = None,
 ) -> list[ColmapView]:
+    # Load real images and camera poses so training can use true multi-view supervision.
     model_path = Path(model_dir)
     image_root = Path(image_dir)
     cameras_path = model_path / "cameras.txt"
@@ -167,6 +172,7 @@ def load_colmap_points3d(
     device: torch.device,
     max_points: int | None = None,
 ) -> ColmapPointCloud:
+    # Load sparse 3D points as a lightweight scene prior when no mesh is available.
     model_path = Path(model_dir)
     points_path = model_path / "points3D.txt"
     if not points_path.exists():

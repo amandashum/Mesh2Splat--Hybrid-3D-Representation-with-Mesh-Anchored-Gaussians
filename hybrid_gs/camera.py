@@ -12,6 +12,8 @@ def _normalize(vector: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
 
 @dataclass
 class Camera:
+    # Store the world-to-camera transform directly so both synthetic and COLMAP
+    # cameras can share the same renderer interface.
     rotation: torch.Tensor
     translation: torch.Tensor
     width: int
@@ -39,6 +41,7 @@ def look_at_camera(
     height: int,
     fov_degrees: float,
 ) -> Camera:
+    # Build a simple pinhole camera from eye/target/up parameters for synthetic orbit views.
     forward = _normalize(target - eye)
     right = _normalize(torch.cross(forward, up, dim=0))
     true_up = _normalize(torch.cross(right, forward, dim=0))
@@ -69,6 +72,7 @@ def orbit_cameras(
     fov_degrees: float,
     device: torch.device,
 ) -> list[Camera]:
+    # Synthetic fallback cameras used when no real COLMAP scene is provided.
     elevation = math.radians(elevation_degrees)
     target = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=device)
     up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=device)

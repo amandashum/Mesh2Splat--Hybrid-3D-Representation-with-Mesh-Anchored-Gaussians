@@ -19,6 +19,7 @@ PROMPT_PALETTES = {
 
 
 def prompt_palette(prompt: str, device: torch.device) -> torch.Tensor:
+    # The palette is a placeholder appearance prior, not a learned generative model.
     lower_prompt = prompt.lower()
     for keyword, palette in PROMPT_PALETTES.items():
         if keyword != "default" and keyword in lower_prompt:
@@ -27,6 +28,7 @@ def prompt_palette(prompt: str, device: torch.device) -> torch.Tensor:
 
 
 def procedural_colors(points: torch.Tensor, normals: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
+    # Cheap initialization used when real colors are not available from COLMAP points.
     indices = (
         (points[:, 0] > 0).long()
         + (points[:, 1] > 0).long()
@@ -66,6 +68,7 @@ class AnchoredGaussianModel(nn.Module):
         jitter: float = 0.03,
     ) -> None:
         super().__init__()
+        # Anchored splats stay close to the structural prior and carry the base appearance.
         palette = prompt_palette(prompt, anchors.device)
         colors = colors_override if colors_override is not None else procedural_colors(anchors, normals, palette)
         noise = jitter * torch.randn_like(anchors)
@@ -109,6 +112,7 @@ class HybridGaussianModel(nn.Module):
         completion_offset: float = 0.10,
     ) -> None:
         super().__init__()
+        # The hybrid model separates trusted structure, local detail, and speculative completion.
 
         self.anchored = AnchoredGaussianModel(
             anchors=anchors,
@@ -127,6 +131,7 @@ class HybridGaussianModel(nn.Module):
 
         detail_outward = detail_offset * detail_normals
         detail_random_walk = detail_jitter * torch.randn_like(detail_anchors)
+        # Detail splats are allowed small deviations around the prior surface.
         self.register_buffer("detail_anchor_positions", detail_anchors)
         self.register_buffer("detail_anchor_normals", detail_normals)
 
@@ -141,6 +146,7 @@ class HybridGaussianModel(nn.Module):
 
         outward = completion_offset * completion_normals
         random_walk = completion_jitter * torch.randn_like(completion_seeds)
+        # Completion splats start farther from the prior because they are meant to explore gaps.
         self.register_buffer("completion_seed_positions", completion_seeds)
         self.register_buffer("completion_seed_normals", completion_normals)
 

@@ -17,12 +17,14 @@ class Mesh:
     faces: torch.Tensor
 
     def normalized(self) -> "Mesh":
+        # Keep different meshes in a consistent scale range for renderer and optimization stability.
         centered = self.vertices - self.vertices.mean(dim=0, keepdim=True)
         scale = centered.norm(dim=-1).amax().clamp_min(1e-6)
         return Mesh(centered / scale, self.faces)
 
 
 def load_obj_mesh(path: str | Path, device: torch.device) -> Mesh:
+    # Minimal OBJ loader: enough for triangle meshes exported by common reconstruction tools.
     vertices = []
     faces = []
     with Path(path).open("r", encoding="utf-8") as handle:
@@ -138,6 +140,7 @@ def create_cone_mesh(device: torch.device, radial_steps: int = 24) -> Mesh:
 
 
 def primitive_mesh_from_prompt(prompt: str, device: torch.device) -> Mesh:
+    # Synthetic fallback when no explicit geometry prior is available.
     lower_prompt = prompt.lower()
     if any(token in lower_prompt for token in ("sphere", "ball", "planet", "orb")):
         return create_uv_sphere_mesh(device)
@@ -147,6 +150,7 @@ def primitive_mesh_from_prompt(prompt: str, device: torch.device) -> Mesh:
 
 
 def sample_surface(mesh: Mesh, num_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
+    # Area-weighted triangle sampling gives anchors distributed over the mesh surface.
     triangles = mesh.vertices[mesh.faces]
     edges_a = triangles[:, 1] - triangles[:, 0]
     edges_b = triangles[:, 2] - triangles[:, 0]
@@ -170,6 +174,7 @@ def sample_completion_regions(
     mesh: Mesh,
     num_samples: int,
 ) -> tuple[torch.Tensor, torch.Tensor, str]:
+    # Open boundaries are the most likely missing regions, so prioritize them when possible.
     triangles = mesh.vertices[mesh.faces]
     edges_a = triangles[:, 1] - triangles[:, 0]
     edges_b = triangles[:, 2] - triangles[:, 0]
