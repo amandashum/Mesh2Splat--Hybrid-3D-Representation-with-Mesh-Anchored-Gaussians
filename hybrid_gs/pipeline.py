@@ -14,6 +14,12 @@ from PIL.Image import Resampling
 from hybrid_gs.camera import orbit_cameras
 from hybrid_gs.colmap import ColmapPointCloud, load_colmap_points3d, load_colmap_text_dataset
 from hybrid_gs.gaussians import GaussianState, HybridGaussianModel, prompt_palette
+from interactive_splat_viewer import (
+    load_metadata as viewer_load_metadata,
+    load_state_from_npz,
+    maybe_subsample,
+    state_to_figure,
+)
 from hybrid_gs.losses import (
     appearance_guidance_loss,
     completion_smoothness_loss,
@@ -43,6 +49,7 @@ class HybridConfig:
     image_size: int
     colmap_resize_long_edge: int | None
     render_tile_size: int | None
+    prompt_viewer: bool
     lr: float
     seed: int
     device: torch.device
@@ -87,6 +94,42 @@ def load_mesh(cfg: HybridConfig) -> Mesh:
 
 def save_metadata(path: Path, payload: dict[str, int | float | str]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
+    if not cfg.prompt_viewer:
+        return
+
+    try:
+        response = input("Create interactive viewer HTML now? [y/N] ").strip().lower()
+    except EOFError:
+        return
+
+    if response not in {"y", "yes"}:
+        return
+
+    state_path = cfg.out_dir / "gaussian_state.npz"
+    metadata_path = cfg.out_dir / "gaussian_metadata.txt"
+    output_html = cfg.out_dir / "viewer.html"
+
+    state = load_state_from_npz(state_path)
+    state = maybe_subsample(state, max_splats=3000)
+    metadata = viewer_load_metadata(metadata_path)
+    figure = state_to_figure(
+        state=state,
+        metadata=metadata,
+        mesh_path=cfg.mesh_path,
+        title=f"Interactive Viewer: {cfg.out_dir.name}",
+        size_scale=38.0,
+        min_size=3.0,
+        mesh_opacity=0.22,
+        show_wireframe=bool(cfg.mesh_path),
+    )
+
+    import plotly.io as pio
+
+    pio.write_html(figure, file=str(output_html), auto_open=False, include_plotlyjs=True)
+    print(f"Saved interactive viewer to: {output_html}")
 
 
 def build_proxy_targets(mesh: Mesh, cameras, prompt: str, image_size: int) -> list[torch.Tensor]:
@@ -487,6 +530,7 @@ def optimize(cfg: HybridConfig) -> None:
         rendered = render_gaussians(final_state, camera, tile_size=cfg.render_tile_size)
         save_image(cfg.out_dir / f"view_{index:02d}_render.png", rendered)
         save_image(cfg.out_dir / f"view_{index:02d}_target.png", target)
+    maybe_prompt_to_create_viewer(cfg)
 
 
 def parse_args() -> HybridConfig:
@@ -527,6 +571,11 @@ def parse_args() -> HybridConfig:
         default=96,
         help="Tile size for memory-efficient rendering. Set to 0 to disable tiling.",
     )
+    parser.add_argument(
+        "--prompt-viewer",
+        action="store_true",
+        help="After training, ask whether to generate viewer.html in the output directory.",
+    )
     parser.add_argument("--lr", type=float, default=0.05, help="Optimizer learning rate.")
     parser.add_argument("--seed", type=int, default=7, help="Random seed.")
     parser.add_argument("--lambda-mask", type=float, default=0.20, help="Weight for optional mask supervision from a real image.")
@@ -566,6 +615,7 @@ def parse_args() -> HybridConfig:
         image_size=args.image_size,
         colmap_resize_long_edge=colmap_resize_long_edge,
         render_tile_size=render_tile_size,
+        prompt_viewer=args.prompt_viewer,
         lr=args.lr,
         seed=args.seed,
         device=device,
