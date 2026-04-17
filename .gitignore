@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+outputs/
+.conda/
+.venv/
+checkpoints/
+.pytest_cache/
+*_frames/
+*_comparison/
+comparison_contact_sheet.png
+*.log
+data/room/images/gerrard-hall/database.db
+data/room/images/gerrard-hall.zip
