@@ -106,6 +106,35 @@ python .\main.py `
   --out-dir .\outputs\colmap_run
 ```
 
+Run with COLMAP inputs but no explicit mesh. If `--colmap-bat` is provided,
+the program can now check for a mesh prior at startup, offer to generate one,
+then continue the same run in mesh mode:
+
+```powershell
+python .\main.py `
+  --colmap-bat C:\tools\COLMAP\COLMAP.bat `
+  --colmap-model-dir .\data\example\colmap\sparse_txt `
+  --colmap-image-dir .\data\example\images `
+  --prompt "building" `
+  --steps 300 `
+  --out-dir .\outputs\auto_mesh_run
+```
+
+Expected startup prompt for that path:
+
+```text
+++++++++++++++++++++++++++++++
++     Check for Mesh Mesh Prior to Compare     +
+++++++++++++++++++++++++++++++
+Checking whether there is mesh prior...
+
+No mesh found, would you like to generate one? y/n
+```
+
+If you answer `y`, the run will call `tools/generate_colmap_mesh.ps1`, write a
+`mesh_prior.obj` into a `mesh_prior\dense\` workspace beside the COLMAP model
+directory by default, then continue training with that generated mesh.
+
 Run in scene reconstruction mode directly from COLMAP sparse points:
 
 ```powershell
@@ -170,13 +199,34 @@ If you want a side-by-side PNG comparison from that same run folder:
 python .\tools\compare_renders.py --single-run-dir C:\mesh2splat\outputs\gerrard_hall_mesh_completion --output-dir C:\mesh2splat\outputs\gerrard_hall_mesh_completion_comparison --left-label "Mesh Prior" --right-label "With Completion" --contact-sheet
 ```
 
+If you want the same end-to-end flow on the South Building sample without
+manually generating the mesh first, use:
+
+```cmd
+cd /d C:\mesh2splat
+.\.venv\Scripts\activate.bat
+python .\main.py --colmap-bat C:\tools\COLMAP\COLMAP.bat --colmap-model-dir C:\mesh2splat\data\room\images\south-building\south-building\sparse --colmap-image-dir C:\mesh2splat\data\room\images\south-building\south-building\images --prompt building --num-views 8 --num-splats 900 --num-detail-splats 550 --num-completion-splats 300 --steps 120 --colmap-resize-long-edge 128 --render-tile-size 48 --render-support-scale 1.75 --render-alpha-threshold 0.002 --lambda-completion-continuity 0.30 --lambda-completion-region 0.45 --prompt-viewer --out-dir C:\mesh2splat\outputs\south_building_mesh_completion
+```
+
+For that South Building path:
+
+- the run will start by checking whether a mesh prior already exists
+- if no mesh is attached yet, answer `y` at the prompt to auto-generate one
+- the generated mesh will default to a `mesh_prior` folder beside the South
+  Building COLMAP model directory unless you override it with
+  `--mesh-workspace`
+- after generation, the run continues automatically in mesh mode, so the output
+  folder can contain both the mesh-prior and with-completion artifacts
+
 Useful controls:
 
 - `--num-splats`: anchored splat count
 - `--num-detail-splats`: detail splat count
 - `--num-completion-splats`: completion splat count
+- `--colmap-bat`: path to `COLMAP.bat` when you want the run to auto-generate a mesh prior
 - `--colmap-model-dir`: folder with `cameras.txt` and `images.txt`
 - `--colmap-image-dir`: folder containing the original or undistorted images
+- `--mesh-workspace`: optional output directory for the auto-generated mesh-prior workspace
 - `--colmap-resize-long-edge`: downscale cap for COLMAP images during training
 - `--render-tile-size`: split rendering into smaller image tiles to reduce GPU memory use
 - `--render-support-scale`: shrink or expand how far each splat influences a tile in screen space

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +50,8 @@ from hybrid_gs.segmentation import build_scene_structure_masks
 class HybridConfig:
     prompt: str
     mesh_path: str | None
+    colmap_bat: str | None
+    mesh_workspace: str | None
     colmap_model_dir: str | None
     colmap_image_dir: str | None
     scene_mode: bool
@@ -198,6 +202,69 @@ def print_phase_detail(*lines: str) -> None:
     # folder.
     for line in lines:
         print(line)
+
+
+def maybe_prepare_mesh_prior(cfg: HybridConfig) -> HybridConfig:
+    # When the user forgets to supply a mesh prior but does have a COLMAP
+    # scene, offer to generate one before training starts. This keeps the run
+    # on the mesh-comparison path without forcing a separate manual step.
+    #
+    # This is the startup flow documented in the README:
+    # - print a mesh-check banner
+    # - ask whether a mesh prior should be generated
+    # - call the COLMAP dense-meshing helper if the user agrees
+    # - continue the same run in mesh mode once mesh_prior.obj exists
+    if cfg.mesh_path:
+        return cfg
+    if not cfg.colmap_model_dir or not cfg.colmap_image_dir:
+        return cfg
+
+    print_phase_banner("Check for Mesh Mesh Prior to Compare")
+    print_phase_detail("Checking whether there is mesh prior...")
+
+    try:
+        response = input("\nNo mesh found, would you like to generate one? y/n ").strip().lower()
+    except EOFError:
+        return cfg
+
+    if response not in {"y", "yes"}:
+        return cfg
+    if not cfg.colmap_bat:
+        print(">>> cannot generate mesh prior automatically without --colmap-bat <<<")
+        return cfg
+
+    # Keep auto-generated dense meshes close to the COLMAP model by default so
+    # each dataset keeps its sparse inputs and derived mesh workspace together.
+    model_dir = Path(cfg.colmap_model_dir)
+    default_workspace = model_dir.parent / "mesh_prior"
+    workspace = Path(cfg.mesh_workspace) if cfg.mesh_workspace else default_workspace
+    script_path = Path(__file__).resolve().parent.parent / "tools" / "generate_colmap_mesh.ps1"
+    command = [
+        "powershell",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        "-ColmapBat",
+        cfg.colmap_bat,
+        "-ImageDir",
+        cfg.colmap_image_dir,
+        "-ModelDir",
+        cfg.colmap_model_dir,
+        "-Workspace",
+        str(workspace),
+        "-Mesher",
+        "poisson",
+    ]
+    subprocess.run(command, check=True)
+    generated_mesh = workspace / "dense" / "mesh_prior.obj"
+    if not generated_mesh.exists():
+        raise FileNotFoundError(f"Expected generated mesh at {generated_mesh}")
+
+    cfg.mesh_path = str(generated_mesh)
+    cfg.scene_mode = False
+    print(f"Generated mesh prior at {generated_mesh}")
+    return cfg
 
 
 def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
@@ -797,6 +864,19 @@ def parse_args() -> HybridConfig:
     # can switch priors without changing scripts.
     parser.add_argument("--prompt", default="stone statue", help="Semantic prompt used for mesh choice and appearance prior.")
     parser.add_argument("--mesh", dest="mesh_path", default=None, help="Optional OBJ mesh path exported from Fantasia3D or another generator.")
+    # These options support the auto mesh-prior path: start from COLMAP
+    # cameras/images, detect that no mesh was supplied, optionally generate one,
+    # then continue the same run in mesh mode.
+    parser.add_argument(
+        "--colmap-bat",
+        default=None,
+        help="Optional COLMAP.bat path used when auto-generating a missing mesh prior before the run.",
+    )
+    parser.add_argument(
+        "--mesh-workspace",
+        default=None,
+        help="Optional workspace directory used when auto-generating a missing mesh prior.",
+    )
     parser.add_argument(
         "--colmap-model-dir",
         default=None,
@@ -887,6 +967,8 @@ def parse_args() -> HybridConfig:
     return HybridConfig(
         prompt=args.prompt,
         mesh_path=args.mesh_path,
+        colmap_bat=args.colmap_bat,
+        mesh_workspace=args.mesh_workspace,
         colmap_model_dir=args.colmap_model_dir,
         colmap_image_dir=args.colmap_image_dir,
         scene_mode=args.scene_mode,
@@ -917,6 +999,10 @@ def parse_args() -> HybridConfig:
 
 
 def main() -> None:
+    # Resolve any optional mesh generation before the random seeds, priors, and
+    # optimizer state are created so the rest of the pipeline can treat a
+    # manual mesh path and an auto-generated mesh path identically.
     cfg = parse_args()
+    cfg = maybe_prepare_mesh_prior(cfg)
     set_seed(cfg.seed)
     optimize(cfg)
