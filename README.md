@@ -81,9 +81,9 @@ The current working environment in this repository was created with:
 - `plotly 6.7.0`
 - `torch 2.12.0.dev20260408+cu128`
 
-If your friend only needs a working environment, installing from
-`requirements.txt` is enough. If they want to mirror the same GPU-enabled
-setup more closely, they should use the same Python version and install a
+If only need a working environment, install
+`requirements.txt`. If want to mirror the same GPU-enabled
+setup more closely, use the same Python version and install a
 PyTorch build compatible with their CUDA and GPU driver setup.
 
 ## CUDA usage
