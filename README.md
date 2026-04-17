@@ -33,6 +33,59 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 6. Save rendered views plus separate mesh-prior and with-completion artifacts
    for inspection
 
+## Environment setup
+
+If someone else wants to recreate the same local environment used for this
+repository, use the steps below from a fresh clone on Windows.
+
+1. Clone the repository and open a terminal in the project root.
+2. Create a virtual environment:
+
+```powershell
+python -m venv .venv
+```
+
+3. Activate it.
+
+In Command Prompt:
+
+```cmd
+.\.venv\Scripts\activate.bat
+```
+
+In PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+4. Upgrade `pip` inside the virtual environment:
+
+```powershell
+python -m pip install --upgrade pip
+```
+
+5. Install the project dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+## Local environment snapshot
+
+The current working environment in this repository was created with:
+
+- Python `3.13.9`
+- `numpy 2.4.4`
+- `Pillow 12.2.0`
+- `plotly 6.7.0`
+- `torch 2.12.0.dev20260408+cu128`
+
+If your friend only needs a working environment, installing from
+`requirements.txt` is enough. If they want to mirror the same GPU-enabled
+setup more closely, they should use the same Python version and install a
+PyTorch build compatible with their CUDA and GPU driver setup.
+
 ## Install
 
 ```powershell

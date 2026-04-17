@@ -166,7 +166,14 @@ def sample_surface(mesh: Mesh, num_samples: int) -> tuple[torch.Tensor, torch.Te
     cross = torch.cross(edges_a, edges_b, dim=-1)
     areas = 0.5 * cross.norm(dim=-1)
     probabilities = areas / areas.sum().clamp_min(1e-8)
-    face_indices = torch.multinomial(probabilities, num_samples, replacement=True)
+    # CUDA multinomial has a category-count limit for very large meshes. Dense
+    # COLMAP Poisson meshes can exceed that, so fall back to CPU sampling for
+    # the face-index draw while keeping the chosen triangles on the original
+    # device for the rest of the pipeline.
+    if probabilities.device.type == "cuda" and probabilities.shape[0] >= (1 << 24):
+        face_indices = torch.multinomial(probabilities.detach().cpu(), num_samples, replacement=True).to(mesh.vertices.device)
+    else:
+        face_indices = torch.multinomial(probabilities, num_samples, replacement=True)
 
     chosen_triangles = triangles[face_indices]
     chosen_normals = _normalize(cross[face_indices])
