@@ -204,7 +204,7 @@ Expected startup prompt for that path:
 
 ```text
 ++++++++++++++++++++++++++++++
-+     Check for Mesh Mesh Prior to Compare     +
++     Check for Mesh Prior to Compare     +
 ++++++++++++++++++++++++++++++
 Checking whether there is mesh prior...
 
