@@ -13,7 +13,7 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 - `main.py`: entrypoint
 - `hybrid_gs/`: core mesh, camera, Gaussian, renderer, loss, and optimization code
 - `hybrid_gs/completion/`: completion-specific seeding and continuity losses for missing regions
-- `hybrid_gs/segmentation.py`: heuristic structure-aware masks that keep completion near plausible building regions
+- `hybrid_gs/segmentation.py`: heuristic scene-structure masks that keep completion near plausible surface continuation regions
 - `interactive_splat_viewer.py`: optional HTML viewer for saved Gaussian states
 - `COLMAP_SETUP.md`: Windows-oriented COLMAP setup notes for multi-view reconstruction
 - `tools/run_colmap.ps1`: helper script for a standard COLMAP sparse pipeline
@@ -111,6 +111,54 @@ python .\main.py `
   --out-dir .\outputs\room_scene
 ```
 
+## How to test
+
+If you want to test the current completion pipeline on the Gerrard Hall example,
+use this full Command Prompt run:
+
+```cmd
+cd /d C:\mesh2splat
+.\.venv\Scripts\activate.bat
+python .\main.py --mesh C:\mesh2splat\data\room\images\gerrard-hall\mesh_prior\dense\mesh_prior.obj --colmap-model-dir C:\mesh2splat\data\room\images\gerrard-hall\sparse --colmap-image-dir C:\mesh2splat\data\room\images\gerrard-hall\images --prompt building --num-views 6 --num-splats 900 --num-detail-splats 550 --num-completion-splats 300 --steps 120 --colmap-resize-long-edge 128 --render-tile-size 48 --render-support-scale 1.75 --render-alpha-threshold 0.002 --lambda-completion-continuity 0.30 --lambda-completion-region 0.45 --prompt-viewer --out-dir C:\mesh2splat\outputs\gerrard_hall_mesh_completion
+```
+
+Expected terminal behavior:
+
+- the usual optimization log with `recon=...`, `completion=...`, `continuity=...`, and `region=...`
+- a `Mesh Prior` banner near the end that lists the mesh-prior files being written
+- a `Completion Using Splats` banner near the end that lists the completion files being written
+- if the completion patch can be formed, the completion banner should mention:
+  - `missing_mesh_parts.obj`
+  - `merged_mesh_with_splats.obj`
+
+Expected output folder:
+
+```text
+C:\mesh2splat\outputs\gerrard_hall_mesh_completion
+```
+
+Important files to inspect after the run:
+
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\mesh_prior.obj`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\mesh_prior_cloud.ply`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\with_completion_cloud.ply`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\mesh_prior_state.npz`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\completion_state.npz`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\gaussian_state.npz`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\view_00_mesh_prior.png`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\view_00_with_completion.png`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\view_00_completion_region_mask.png`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\view_00_surface_core_mask.png`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\view_00_occluder_mask.png`
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\missing_mesh_parts.obj` if a completion patch is produced
+- `C:\mesh2splat\outputs\gerrard_hall_mesh_completion\merged_mesh_with_splats.obj` if a merged completion mesh is produced
+
+If you want a side-by-side PNG comparison from that same run folder:
+
+```cmd
+python .\tools\compare_renders.py --single-run-dir C:\mesh2splat\outputs\gerrard_hall_mesh_completion --output-dir C:\mesh2splat\outputs\gerrard_hall_mesh_completion_comparison --left-label "Mesh Prior" --right-label "With Completion" --contact-sheet
+```
+
 Useful controls:
 
 - `--num-splats`: anchored splat count
@@ -126,7 +174,7 @@ Useful controls:
 - `--max-sparse-points`: cap the sparse COLMAP point cloud used in scene mode
 - `--prompt-viewer`: ask at the end of training whether to generate `viewer.html`
 - `--lambda-completion-continuity`: strengthen the new hole-filling continuity loss for completion splats
-- `--lambda-completion-region`: strengthen the structure-aware mask loss that keeps completion near plausible building gaps
+- `--lambda-completion-region`: strengthen the scene-structure mask loss that keeps completion near plausible surface continuation regions
 - `--steps`: optimization length
 - `--cpu`: force CPU execution
 
@@ -142,7 +190,8 @@ Each run now writes two explicit stages into the output folder:
 - `view_XX_mesh_prior.png`: render from the mesh-prior-only state
 - `view_XX_with_completion.png`: render from the final completed state
 - `view_XX_completion_region_mask.png`: heuristic mask showing where completion is allowed to grow
-- `view_XX_building_core_mask.png`: conservative mask for the current building-supported silhouette
+- `view_XX_surface_core_mask.png`: conservative mask for the current geometry-supported surface silhouette
+- `view_XX_occluder_mask.png`: near-surface disagreement mask highlighting likely occluders or missing-surface zones
 
 ## Completion package
 
@@ -182,22 +231,25 @@ completion seeds: mesh_boundary_bridge
 That indicates the completion branch is being initialized from mesh-hole
 boundaries rather than generic fallback surface samples.
 
-## Structure-aware segmentation
+## Scene-structure segmentation
 
-This repository does not ship a learned semantic segmenter. Instead, it now
-uses a pragmatic structure-aware segmentation pass in `hybrid_gs/segmentation.py`:
+This repository still does not ship a learned semantic segmenter. Instead, it
+now uses a scene-general structure pass in `hybrid_gs/segmentation.py`:
 
-- the current mesh-prior silhouette marks the building core
-- that silhouette is dilated to create a near-building completion context
-- simple color heuristics identify likely vegetation and sky
-- completion is encouraged to stay inside the building context and discouraged
-  from expanding into sky, ground, or distant vegetation
+- the current mesh-prior silhouette marks the known surface core
+- that silhouette is dilated to create a near-surface continuation context
+- residual disagreement between the target image and the mesh-prior render is
+  used to flag likely occluders or missing-surface zones
+- simple brightness and saturation heuristics flag likely clear background
+- completion is encouraged to stay near plausible surface continuation regions
+  and discouraged from expanding into obvious background or unsupported lower
+  image regions
 
-This is meant to make completion more semantically logical for cases like:
+This is meant to make completion more scene-general, for cases like:
 
-- filling wall gaps near bushes
-- avoiding giant roof closures
-- avoiding random floating completion far from the building
+- filling surfaces obscured by bushes or clutter
+- avoiding giant roof or ground closures
+- avoiding random floating completion far from the main structure
 
 ## COLMAP workflow
 

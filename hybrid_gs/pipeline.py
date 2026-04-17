@@ -41,7 +41,7 @@ from hybrid_gs.losses import (
 )
 from hybrid_gs.mesh import Mesh, load_obj_mesh, primitive_mesh_from_prompt, sample_surface
 from hybrid_gs.renderer import render_gaussians
-from hybrid_gs.segmentation import build_semantic_masks
+from hybrid_gs.segmentation import build_scene_structure_masks
 
 
 @dataclass
@@ -573,6 +573,10 @@ def optimize(cfg: HybridConfig) -> None:
         completion_region_penalty = torch.zeros((), device=cfg.device)
         mask_loss = torch.zeros((), device=cfg.device)
         for camera, target in zip(cameras, targets):
+            # Render the known-surface branches separately so the scene-general
+            # structure masks can reason about "what the current geometry
+            # already explains" versus "what only the completion branch is
+            # trying to add".
             mesh_prior_render, mesh_prior_alpha = render_gaussians(
                 concat_states(anchored_state, detail_state),
                 camera,
@@ -597,11 +601,14 @@ def optimize(cfg: HybridConfig) -> None:
                 alpha_threshold=cfg.render_alpha_threshold,
             )
             reconstruction = reconstruction + reconstruction_loss(rendered, target)
-            semantic_masks = build_semantic_masks(target, mesh_prior_alpha)
+            # The scene-structure masks steer completion toward plausible
+            # continuation zones without assuming the scene is specifically a
+            # building. This is the current semantic/structural gating layer.
+            scene_masks = build_scene_structure_masks(target, mesh_prior_render, mesh_prior_alpha)
             completion_region_penalty = completion_region_penalty + completion_region_loss(
                 completion_alpha,
-                semantic_masks["completion_region"],
-                semantic_masks["completion_band"],
+                scene_masks["completion_allowed"],
+                scene_masks["completion_focus"],
             )
         reconstruction = reconstruction / len(cameras)
         completion_region_penalty = completion_region_penalty / len(cameras)
@@ -718,7 +725,7 @@ def optimize(cfg: HybridConfig) -> None:
             alpha_threshold=cfg.render_alpha_threshold,
             return_alpha=True,
         )
-        semantic_masks = build_semantic_masks(target, mesh_prior_alpha)
+        scene_masks = build_scene_structure_masks(target, mesh_prior_render, mesh_prior_alpha)
         rendered = render_gaussians(
             final_state,
             camera,
@@ -728,8 +735,12 @@ def optimize(cfg: HybridConfig) -> None:
         )
         save_image(cfg.out_dir / f"view_{index:02d}_mesh_prior.png", mesh_prior_render)
         save_image(cfg.out_dir / f"view_{index:02d}_target.png", target)
-        save_mask_image(cfg.out_dir / f"view_{index:02d}_completion_region_mask.png", semantic_masks["completion_region"])
-        save_mask_image(cfg.out_dir / f"view_{index:02d}_building_core_mask.png", semantic_masks["building_core"])
+        # Export the masks per view so the user can inspect whether completion
+        # is being constrained for the right reason: near-surface continuation,
+        # occlusion, or obvious background suppression.
+        save_mask_image(cfg.out_dir / f"view_{index:02d}_completion_region_mask.png", scene_masks["completion_allowed"])
+        save_mask_image(cfg.out_dir / f"view_{index:02d}_surface_core_mask.png", scene_masks["surface_core"])
+        save_mask_image(cfg.out_dir / f"view_{index:02d}_occluder_mask.png", scene_masks["occluder"])
 
     print_phase_banner("Completion Using Splats")
     completion_mesh_artifacts = build_completion_mesh_exports(
