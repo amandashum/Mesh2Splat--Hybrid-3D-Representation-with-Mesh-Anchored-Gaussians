@@ -14,12 +14,18 @@ from PIL.Image import Resampling
 
 from hybrid_gs.camera import orbit_cameras
 from hybrid_gs.colmap import ColmapPointCloud, load_colmap_points3d, load_colmap_text_dataset
-from hybrid_gs.gaussians import GaussianState, HybridGaussianModel, prompt_palette
+from hybrid_gs.completion import (
+    CompletionPrior,
+    build_mesh_completion_prior,
+    build_sparse_completion_prior,
+    completion_continuity_loss,
+)
+from hybrid_gs.gaussians import GaussianState, HybridGaussianModel, concat_states, prompt_palette
 from interactive_splat_viewer import (
     load_metadata as viewer_load_metadata,
     load_state_from_npz,
     maybe_subsample,
-    state_to_figure,
+    save_rendered_viewer_html,
 )
 from hybrid_gs.losses import (
     appearance_guidance_loss,
@@ -30,7 +36,7 @@ from hybrid_gs.losses import (
     scale_regularization,
     tether_loss,
 )
-from hybrid_gs.mesh import Mesh, load_obj_mesh, primitive_mesh_from_prompt, sample_completion_regions, sample_surface
+from hybrid_gs.mesh import Mesh, load_obj_mesh, primitive_mesh_from_prompt, sample_surface
 from hybrid_gs.renderer import render_gaussians
 
 
@@ -59,6 +65,7 @@ class HybridConfig:
     lambda_tether: float = 3.0
     lambda_detail: float = 0.25
     lambda_completion: float = 0.35
+    lambda_completion_continuity: float = 0.20
     lambda_appearance: float = 0.15
     lambda_scale: float = 0.02
     lambda_opacity: float = 0.01
@@ -93,6 +100,48 @@ def save_gaussian_state(path: Path, state: GaussianState) -> None:
     )
 
 
+def save_obj_mesh(path: Path, mesh: Mesh) -> None:
+    # Save the normalized mesh prior into the output folder so the exact
+    # geometry used by training can be opened later without hunting for the
+    # original source OBJ. This is intentionally the normalized training mesh,
+    # not a verbatim file copy, so the geometry matches the optimizer's scale.
+    vertices = mesh.vertices.detach().cpu().numpy()
+    faces = mesh.faces.detach().cpu().numpy()
+    with path.open("w", encoding="utf-8") as handle:
+        for vertex in vertices:
+            handle.write(f"v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
+        for face in faces:
+            handle.write(f"f {int(face[0]) + 1} {int(face[1]) + 1} {int(face[2]) + 1}\n")
+
+
+def save_gaussian_point_cloud(path: Path, state: GaussianState) -> None:
+    # MeshLab can open colored PLY point clouds directly, so export the
+    # Gaussian centers as a geometry comparison artifact before and after
+    # completion. These are still splat centers, not a surfaced mesh, but they
+    # are useful when you want to inspect how completion changed the spatial
+    # distribution without waiting on the HTML viewer.
+    means = state.means.detach().cpu().numpy()
+    colors = (state.colors.detach().cpu().clamp(0.0, 1.0).numpy() * 255.0).astype(np.uint8)
+    opacity = (state.opacity.detach().cpu().clamp(0.0, 1.0).numpy().reshape(-1) * 255.0).astype(np.uint8)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("ply\n")
+        handle.write("format ascii 1.0\n")
+        handle.write(f"element vertex {means.shape[0]}\n")
+        handle.write("property float x\n")
+        handle.write("property float y\n")
+        handle.write("property float z\n")
+        handle.write("property uchar red\n")
+        handle.write("property uchar green\n")
+        handle.write("property uchar blue\n")
+        handle.write("property uchar alpha\n")
+        handle.write("end_header\n")
+        for point, color, alpha in zip(means, colors, opacity):
+            handle.write(
+                f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} "
+                f"{int(color[0])} {int(color[1])} {int(color[2])} {int(alpha)}\n"
+            )
+
+
 def load_mesh(cfg: HybridConfig) -> Mesh:
     # Mesh mode either consumes a user-supplied OBJ or falls back to a simple
     # primitive so the repo remains runnable without external assets.
@@ -104,6 +153,14 @@ def load_mesh(cfg: HybridConfig) -> Mesh:
 def save_metadata(path: Path, payload: dict[str, int | float | str]) -> None:
     # Keep a small sidecar file describing the branch split for the viewer.
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def print_phase_banner(title: str) -> None:
+    # Large scene runs are easier to follow when the log clearly marks the
+    # structural prior stage and the later completion-learning stage.
+    text = title.strip()
+    border = "+" * max(len(text) + 12, 23)
+    print(f"\n\n{border}\n+     {text}     +\n{border}")
 
 
 def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
@@ -127,20 +184,27 @@ def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
     state = load_state_from_npz(state_path)
     state = maybe_subsample(state, max_splats=3000)
     metadata = viewer_load_metadata(metadata_path)
-    figure = state_to_figure(
+    save_rendered_viewer_html(
         state=state,
         metadata=metadata,
-        mesh_path=cfg.mesh_path,
+        output_path=output_html,
         title=f"Interactive Viewer: {cfg.out_dir.name}",
-        size_scale=38.0,
-        min_size=3.0,
-        mesh_opacity=0.22,
-        show_wireframe=bool(cfg.mesh_path),
+        mesh_path=cfg.mesh_path,
+        max_splats=3000,
+        num_frames=40,
+        width=768,
+        height=768,
+        fps=10.0,
+        fov_degrees=45.0,
+        elevation_degrees=18.0,
+        radius_scale=2.3,
+        supersample=1.5,
+        crop_padding=0.0,
+        tile_size=cfg.render_tile_size or 96,
+        support_scale=cfg.render_support_scale,
+        alpha_threshold=cfg.render_alpha_threshold,
+        device_name="auto",
     )
-
-    import plotly.io as pio
-
-    pio.write_html(figure, file=str(output_html), auto_open=False, include_plotlyjs=True)
     print(f"Saved interactive viewer to: {output_html}")
 
 
@@ -263,9 +327,11 @@ def _sample_indices_from_weights(num_items: int, sample_count: int, weights: tor
 def build_scene_prior(
     cfg: HybridConfig,
     cameras: list,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, CompletionPrior, torch.Tensor]:
     # Turn the sparse COLMAP cloud into anchored/detail/completion seeds for
-    # scene reconstruction. This is the heart of scene mode.
+    # scene reconstruction. This is the heart of scene mode:
+    # anchored/detail splats come from reliable sparse points, while the new
+    # completion prior targets weakly observed frontier regions.
     if not cfg.colmap_model_dir:
         raise ValueError("Scene mode requires --colmap-model-dir.")
 
@@ -289,48 +355,31 @@ def build_scene_prior(
     detail_anchors = point_cloud.xyz[detail_indices]
     detail_normals = normals[detail_indices]
 
-    support = point_cloud.track_length
-    uncertainty = 1.0 / support.clamp_min(1.0)
-    camera_centers = torch.stack([-camera.rotation.T @ camera.translation for camera in cameras], dim=0)
-    distances = torch.cdist(point_cloud.xyz, camera_centers).amin(dim=1)
-    completion_weights = uncertainty * (0.35 + distances / distances.max().clamp_min(1e-8))
-    # Under-supported and far-from-camera points are treated as better
-    # candidates for gap completion because they are more likely to lie near
-    # missing or weakly observed regions.
-    completion_indices = _sample_indices_from_weights(
-        point_cloud.xyz.shape[0],
-        cfg.num_completion_splats,
-        completion_weights,
+    completion_prior = build_sparse_completion_prior(
+        point_cloud=point_cloud,
+        normals=normals,
+        cameras=cameras,
+        num_samples=cfg.num_completion_splats,
     )
-    completion_base = point_cloud.xyz[completion_indices]
-    completion_normals = normals[completion_indices]
-    colors = point_cloud.rgb.clamp(0.02, 0.98)
-    completion_seed_colors = colors[completion_indices]
-
-    if camera_centers.shape[0] > 0 and completion_base.shape[0] > 0:
-        view_deltas = completion_base.unsqueeze(1) - camera_centers.unsqueeze(0)
-        nearest_camera = torch.argmin(view_deltas.norm(dim=-1), dim=1)
-        view_direction = completion_base - camera_centers[nearest_camera]
-        view_direction = view_direction / view_direction.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-    else:
-        view_direction = completion_normals
-
-    completion_normals = completion_normals + 0.6 * view_direction
-    # Push completion seeds slightly outward so they do not collapse exactly on
-    # top of the sparse support points from the start.
-    completion_normals = completion_normals / completion_normals.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-    completion_seeds = completion_base + 0.04 * completion_normals
 
     color_points = point_cloud.xyz
     point_colors = point_cloud.rgb
     anchor_colors = point_colors[anchor_indices]
     detail_colors = point_colors[detail_indices]
+    completion_seed_colors = point_colors.new_zeros((completion_prior.seeds.shape[0], 3))
+    if completion_prior.seeds.shape[0] > 0:
+        completion_color_indices = torch.topk(
+            torch.cdist(completion_prior.seeds, color_points),
+            k=1,
+            largest=False,
+        ).indices.squeeze(1)
+        completion_seed_colors = point_colors[completion_color_indices]
     if anchor_colors.numel() == 0:
         anchor_colors = build_palette_colors(anchors, anchor_normals, palette)
     if detail_colors.numel() == 0:
         detail_colors = build_palette_colors(detail_anchors, detail_normals, palette)
     if completion_seed_colors.numel() == 0:
-        completion_seed_colors = build_palette_colors(completion_seeds, completion_normals, palette)
+        completion_seed_colors = build_palette_colors(completion_prior.seeds, completion_prior.normals, palette)
 
     scene_colors = torch.cat((anchor_colors, detail_colors, completion_seed_colors), dim=0)
     return (
@@ -338,9 +387,7 @@ def build_scene_prior(
         anchor_normals,
         detail_anchors,
         detail_normals,
-        completion_seeds,
-        completion_normals,
-        "colmap_sparse_scene",
+        completion_prior,
         scene_colors,
     )
 
@@ -394,18 +441,18 @@ def maybe_load_reference_supervision(cfg: HybridConfig) -> tuple[torch.Tensor, t
 def build_mesh_prior(
     cfg: HybridConfig,
     cameras: list,
-) -> tuple[Mesh | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, torch.Tensor | None]:
+) -> tuple[Mesh | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, CompletionPrior, torch.Tensor | None]:
     # Mesh mode and scene mode share the same Gaussian optimizer; they only
-    # differ in how seeds are built.
+    # differ in how seeds are built. Returning `CompletionPrior` instead of raw
+    # seed tensors keeps the strategy name and confidence weights attached to
+    # the completion branch all the way through optimization and export.
     if cfg.scene_mode and cfg.colmap_model_dir:
         (
             anchors,
             normals,
             detail_anchors,
             detail_normals,
-            completion_seeds,
-            completion_normals,
-            completion_strategy,
+            completion_prior,
             scene_colors,
         ) = build_scene_prior(cfg, cameras)
         return (
@@ -414,28 +461,21 @@ def build_mesh_prior(
             normals,
             detail_anchors,
             detail_normals,
-            completion_seeds,
-            completion_normals,
-            completion_strategy,
+            completion_prior,
             scene_colors,
         )
 
     mesh = load_mesh(cfg)
     anchors, normals = sample_surface(mesh, cfg.num_splats)
     detail_anchors, detail_normals = sample_detail_anchors(anchors, normals, cfg.num_detail_splats)
-    completion_seeds, completion_normals, completion_strategy = sample_completion_regions(
-        mesh,
-        cfg.num_completion_splats,
-    )
+    completion_prior = build_mesh_completion_prior(mesh, cfg.num_completion_splats)
     return (
         mesh,
         anchors,
         normals,
         detail_anchors,
         detail_normals,
-        completion_seeds,
-        completion_normals,
-        completion_strategy,
+        completion_prior,
         None,
     )
 
@@ -452,9 +492,7 @@ def optimize(cfg: HybridConfig) -> None:
         normals,
         detail_anchors,
         detail_normals,
-        completion_seeds,
-        completion_normals,
-        completion_strategy,
+        completion_prior,
         scene_colors,
     ) = build_mesh_prior(cfg, cameras)
     model = HybridGaussianModel(
@@ -462,8 +500,8 @@ def optimize(cfg: HybridConfig) -> None:
         normals=normals,
         detail_anchors=detail_anchors,
         detail_normals=detail_normals,
-        completion_seeds=completion_seeds,
-        completion_normals=completion_normals,
+        completion_seeds=completion_prior.seeds,
+        completion_normals=completion_prior.normals,
         prompt=cfg.prompt,
         anchor_colors=scene_colors[: anchors.shape[0]] if scene_colors is not None else None,
         detail_colors=scene_colors[anchors.shape[0] : anchors.shape[0] + detail_anchors.shape[0]] if scene_colors is not None else None,
@@ -472,15 +510,15 @@ def optimize(cfg: HybridConfig) -> None:
     reference_supervision = maybe_load_reference_supervision(cfg)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
-    total_splats = cfg.num_splats + detail_anchors.shape[0] + completion_seeds.shape[0]
+    total_splats = cfg.num_splats + detail_anchors.shape[0] + completion_prior.seeds.shape[0]
     print(
         f"Running hybrid baseline with {cfg.num_splats} anchored splats + "
         f"{detail_anchors.shape[0]} detail splats + "
-        f"{completion_seeds.shape[0]} completion splats on {cfg.device}."
+        f"{completion_prior.seeds.shape[0]} completion splats on {cfg.device}."
     )
     print(
         f"Pipeline: {'scene prior' if cfg.scene_mode else 'mesh prior'} -> anchored splats + detail splats + completion splats "
-        f"-> refinement -> multi-view render (completion seeds: {completion_strategy}, supervision: {view_source})"
+        f"-> refinement -> multi-view render (completion seeds: {completion_prior.strategy}, supervision: {view_source})"
     )
     start_time = time.perf_counter()
     last_log_time = start_time
@@ -537,6 +575,12 @@ def optimize(cfg: HybridConfig) -> None:
             model.completion_seed_positions,
             model.completion_seed_normals,
         )
+        completion_continuity = completion_continuity_loss(
+            completion_state.means,
+            model.completion_seed_positions,
+            model.completion_seed_normals,
+            completion_prior.strengths,
+        )
         appearance = appearance_guidance_loss(state.colors, model.palette)
         scale_penalty = scale_regularization(state.scales)
         opacity_penalty = opacity_regularization(state.opacity)
@@ -546,6 +590,7 @@ def optimize(cfg: HybridConfig) -> None:
             + cfg.lambda_tether * tether
             + cfg.lambda_detail * detail
             + cfg.lambda_completion * completion
+            + cfg.lambda_completion_continuity * completion_continuity
             + cfg.lambda_appearance * appearance
             + cfg.lambda_scale * scale_penalty
             + cfg.lambda_opacity * opacity_penalty
@@ -570,13 +615,21 @@ def optimize(cfg: HybridConfig) -> None:
                 f"tether={tether.item():.4f} "
                 f"detail={detail.item():.4f} "
                 f"completion={completion.item():.4f} "
+                f"continuity={completion_continuity.item():.4f} "
                 f"appearance={appearance.item():.4f} "
                 f"mask={mask_loss.item():.4f}"
             )
             last_log_time = now
 
     final_state = model.state()
-    save_gaussian_state(cfg.out_dir / "gaussian_state.npz", final_state)
+    mesh_prior_state = concat_states(model.anchored_state(), model.detail_state())
+    # Export both stages explicitly so comparisons do not rely on recomputing
+    # states later: mesh-prior-only and the final completion-enhanced result.
+    print_phase_banner("Mesh Prior")
+    if mesh is not None:
+        save_obj_mesh(cfg.out_dir / "mesh_prior.obj", mesh)
+    save_gaussian_point_cloud(cfg.out_dir / "mesh_prior_cloud.ply", mesh_prior_state)
+    save_gaussian_state(cfg.out_dir / "mesh_prior_state.npz", mesh_prior_state)
     save_metadata(
         cfg.out_dir / "gaussian_metadata.txt",
         {
@@ -584,10 +637,17 @@ def optimize(cfg: HybridConfig) -> None:
             "detail_splats": int(detail_state.means.shape[0]),
             "completion_splats": int(completion_state.means.shape[0]),
             "total_splats": int(total_splats),
-            "completion_seed_strategy": completion_strategy,
+            "completion_seed_strategy": completion_prior.strategy,
         },
     )
     for index, (camera, target) in enumerate(zip(cameras, targets)):
+        mesh_prior_render = render_gaussians(
+            mesh_prior_state,
+            camera,
+            tile_size=cfg.render_tile_size,
+            support_scale=cfg.render_support_scale,
+            alpha_threshold=cfg.render_alpha_threshold,
+        )
         rendered = render_gaussians(
             final_state,
             camera,
@@ -595,8 +655,23 @@ def optimize(cfg: HybridConfig) -> None:
             support_scale=cfg.render_support_scale,
             alpha_threshold=cfg.render_alpha_threshold,
         )
-        save_image(cfg.out_dir / f"view_{index:02d}_render.png", rendered)
+        save_image(cfg.out_dir / f"view_{index:02d}_mesh_prior.png", mesh_prior_render)
         save_image(cfg.out_dir / f"view_{index:02d}_target.png", target)
+
+    print_phase_banner("Completion Using Splats")
+    save_gaussian_point_cloud(cfg.out_dir / "with_completion_cloud.ply", final_state)
+    save_gaussian_state(cfg.out_dir / "gaussian_state.npz", final_state)
+    save_gaussian_state(cfg.out_dir / "completion_state.npz", final_state)
+    for index, (camera, _) in enumerate(zip(cameras, targets)):
+        rendered = render_gaussians(
+            final_state,
+            camera,
+            tile_size=cfg.render_tile_size,
+            support_scale=cfg.render_support_scale,
+            alpha_threshold=cfg.render_alpha_threshold,
+        )
+        save_image(cfg.out_dir / f"view_{index:02d}_with_completion.png", rendered)
+        save_image(cfg.out_dir / f"view_{index:02d}_render.png", rendered)
     maybe_prompt_to_create_viewer(cfg)
 
 
@@ -662,6 +737,12 @@ def parse_args() -> HybridConfig:
     parser.add_argument("--lambda-mask", type=float, default=0.20, help="Weight for optional mask supervision from a real image.")
     parser.add_argument("--lambda-detail", type=float, default=0.25, help="Weight for mesh-local detail splat tethering.")
     parser.add_argument("--lambda-completion", type=float, default=0.35, help="Weight for weak completion-splat geometry regularization.")
+    parser.add_argument(
+        "--lambda-completion-continuity",
+        type=float,
+        default=0.20,
+        help="Weight for the completion continuity loss that keeps hole-filling splats coherent.",
+    )
     parser.add_argument("--num-detail-splats", type=int, default=192, help="Residual detail splats kept close to the mesh surface.")
     parser.add_argument("--num-completion-splats", type=int, default=128, help="Additional weakly constrained splats used to fill missing regions.")
     parser.add_argument("--max-sparse-points", type=int, default=12000, help="Maximum sparse COLMAP points kept when scene mode is enabled.")
@@ -705,6 +786,7 @@ def parse_args() -> HybridConfig:
         lambda_mask=args.lambda_mask,
         lambda_detail=args.lambda_detail,
         lambda_completion=args.lambda_completion,
+        lambda_completion_continuity=args.lambda_completion_continuity,
         num_detail_splats=args.num_detail_splats,
         num_completion_splats=args.num_completion_splats,
         max_sparse_points=args.max_sparse_points,

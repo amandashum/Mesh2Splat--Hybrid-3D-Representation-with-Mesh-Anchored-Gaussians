@@ -12,6 +12,7 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 
 - `main.py`: entrypoint
 - `hybrid_gs/`: core mesh, camera, Gaussian, renderer, loss, and optimization code
+- `hybrid_gs/completion/`: completion-specific seeding and continuity losses for missing regions
 - `interactive_splat_viewer.py`: optional HTML viewer for saved Gaussian states
 - `COLMAP_SETUP.md`: Windows-oriented COLMAP setup notes for multi-view reconstruction
 - `tools/run_colmap.ps1`: helper script for a standard COLMAP sparse pipeline
@@ -23,9 +24,13 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 1. Load an OBJ mesh, create a primitive mesh, or use a COLMAP sparse scene prior
 2. Optionally load real multi-view cameras and targets from a COLMAP text export
 3. Build anchor, detail, and completion seeds from the mesh or sparse scene points
+   Completion seeding now lives in `hybrid_gs/completion/` so missing-region
+   logic can evolve independently of mesh loading and rendering.
 4. Initialize anchored, detail, and completion Gaussian branches
-5. Optimize Gaussian parameters with reconstruction, tether, completion, appearance, scale, and opacity losses
-6. Save rendered views plus a `gaussian_state.npz` snapshot for inspection
+5. Optimize Gaussian parameters with reconstruction, tether, completion,
+   completion-continuity, appearance, scale, and opacity losses
+6. Save rendered views plus separate mesh-prior and with-completion artifacts
+   for inspection
 
 ## Install
 
@@ -119,8 +124,45 @@ Useful controls:
 - `--scene-mode`: use COLMAP sparse points as the scene prior instead of an OBJ mesh
 - `--max-sparse-points`: cap the sparse COLMAP point cloud used in scene mode
 - `--prompt-viewer`: ask at the end of training whether to generate `viewer.html`
+- `--lambda-completion-continuity`: strengthen the new hole-filling continuity loss for completion splats
 - `--steps`: optimization length
 - `--cpu`: force CPU execution
+
+Each run now writes two explicit stages into the output folder:
+
+- `mesh_prior.obj`: the normalized mesh prior actually used by training
+- `mesh_prior_cloud.ply`: Gaussian centers before completion is applied
+- `with_completion_cloud.ply`: Gaussian centers after completion learning
+- `mesh_prior_state.npz`: saved Gaussian state before completion
+- `completion_state.npz`: saved Gaussian state after completion
+- `view_XX_mesh_prior.png`: render from the mesh-prior-only state
+- `view_XX_with_completion.png`: render from the final completed state
+
+## Completion package
+
+The new `hybrid_gs/completion/` folder is where missing-region learning lives:
+
+- `seeding.py` finds likely completion regions
+  - mesh mode: sample along open boundary edges and push seeds just beyond the missing side
+  - scene mode: sample sparse COLMAP frontier points with low support and high uncertainty
+- `losses.py` adds a continuity loss so nearby completion splats move like a
+  coherent surface extension instead of drifting independently
+
+If you want completion splats to stay more tightly organized while filling mesh
+holes, increase:
+
+```powershell
+--lambda-completion-continuity 0.30
+```
+
+When the mesh really has open boundaries, watch the log for:
+
+```text
+completion seeds: mesh_boundary_bridge
+```
+
+That indicates the completion branch is being initialized from mesh-hole
+boundaries rather than generic fallback surface samples.
 
 ## COLMAP workflow
 
@@ -133,6 +175,48 @@ This repository can train against a COLMAP sparse reconstruction exported to TXT
 5. For scene reconstruction, run `main.py --scene-mode` directly on the sparse model and image folder.
 
 See `COLMAP_SETUP.md` for the Windows setup path and the included `tools/run_colmap.ps1` helper.
+
+## Generate a Mesh Prior from a Scene
+
+If you already have a COLMAP sparse model and image folder, you can generate a
+dense mesh prior and convert it to OBJ for the existing `--mesh` workflow.
+
+This helper runs:
+
+1. `image_undistorter`
+2. `patch_match_stereo`
+3. `stereo_fusion`
+4. `poisson_mesher` or `delaunay_mesher`
+5. `tools/ply_to_obj.py` to write `mesh_prior.obj`
+
+Example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\generate_colmap_mesh.ps1 `
+  -ColmapBat C:\tools\COLMAP\COLMAP.bat `
+  -ImageDir .\data\room\images `
+  -ModelDir .\data\room\colmap\sparse_txt `
+  -Workspace .\data\room\mesh_prior `
+  -Mesher poisson
+```
+
+After it finishes, the OBJ mesh prior will be at:
+
+```text
+.\data\room\mesh_prior\dense\mesh_prior.obj
+```
+
+You can then use it in mesh mode:
+
+```powershell
+python .\main.py `
+  --mesh .\data\room\mesh_prior\dense\mesh_prior.obj `
+  --colmap-model-dir .\data\room\colmap\sparse_txt `
+  --colmap-image-dir .\data\room\images `
+  --num-views 24 `
+  --steps 300 `
+  --out-dir .\outputs\room_mesh_prior
+```
 
 ## Renderer Tuning
 
@@ -170,16 +254,67 @@ python .\interactive_splat_viewer.py `
   --output-html .\outputs\demo\viewer.html
 ```
 
-If you also have the source mesh:
+The viewer is now renderer-backed rather than a 3D scatter plot. It renders an
+orbit sequence from the saved Gaussian state, then writes a lightweight HTML
+player plus a sibling `*_frames/` folder of PNG images. Keep that frame folder
+beside the HTML if you move the viewer elsewhere.
+
+Useful viewer controls:
+
+- `--num-frames`: number of orbit frames referenced by the HTML player
+- `--width` / `--height`: rendered frame resolution
+- `--supersample`: render above display resolution, then downsample for a cleaner viewer image
+- `--mesh`: when you have an OBJ mesh prior, include a Plotly geometry panel beside the rendered orbit viewer
+- `--radius-scale`: how tightly the orbit camera hugs the reconstruction
+- `--crop-padding`: extra padding around the visible alpha footprint after auto-cropping. Use `0` to keep the looser default framing.
+- `--render-tile-size`: tile size used while rendering the viewer frames
+- `--render-support-scale`: screen-space support used by the viewer renderer
+- `--render-alpha-threshold`: skips negligible splat contributions while generating viewer frames
+
+If you want the viewer to stay closer to the older looser framing, keep `--crop-padding 0`.
+If you want a tighter-quality crop, use:
+
+```powershell
+python .\interactive_splat_viewer.py `
+  --state .\outputs\demo\gaussian_state.npz `
+  --metadata .\outputs\demo\gaussian_metadata.txt `
+  --num-frames 48 `
+  --width 768 `
+  --height 768 `
+  --supersample 1.75 `
+  --radius-scale 1.45 `
+  --crop-padding 0.12 `
+  --render-tile-size 64 `
+  --output-html .\outputs\demo\viewer.html
+```
+
+If you want to keep the explicit mesh geometry visible in the same HTML:
 
 ```powershell
 python .\interactive_splat_viewer.py `
   --state .\outputs\mesh_run\gaussian_state.npz `
   --metadata .\outputs\mesh_run\gaussian_metadata.txt `
   --mesh .\data\example.obj `
-  --output-html .\outputs\mesh_run\viewer.html `
-  --show-wireframe
+  --output-html .\outputs\mesh_run\viewer.html
 ```
+
+## Build side-by-side comparisons
+
+If one run folder already contains both `view_XX_mesh_prior.png` and
+`view_XX_with_completion.png`, you can generate side-by-side comparison images
+directly:
+
+```powershell
+python .\tools\compare_renders.py `
+  --single-run-dir .\outputs\mesh_run `
+  --output-dir .\outputs\mesh_run_comparison `
+  --left-label "Mesh Prior" `
+  --right-label "With Completion" `
+  --contact-sheet
+```
+
+This writes one comparison image per matching view plus a single
+`comparison_contact_sheet.png`.
 
 ## Current limitations
 
