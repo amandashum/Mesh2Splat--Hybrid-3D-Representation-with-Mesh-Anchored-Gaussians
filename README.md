@@ -86,6 +86,33 @@ If your friend only needs a working environment, installing from
 setup more closely, they should use the same Python version and install a
 PyTorch build compatible with their CUDA and GPU driver setup.
 
+## CUDA usage
+
+Training uses CUDA automatically when `torch.cuda.is_available()` is `True`.
+You do not need to pass a separate GPU flag.
+
+- default behavior: use `cuda` when available, otherwise fall back to `cpu`
+- use `--cpu` only when you want to force CPU execution
+
+Example default run on GPU:
+
+```powershell
+python .\main.py --steps 200 --out-dir .\outputs\demo
+```
+
+Example forced CPU run:
+
+```powershell
+python .\main.py --cpu --steps 200 --out-dir .\outputs\demo_cpu
+```
+
+The interactive viewer also defaults to automatic device selection, and you
+can force GPU rendering explicitly with:
+
+```powershell
+python .\interactive_splat_viewer.py --state .\outputs\demo\gaussian_state.npz --device cuda
+```
+
 ## Install
 
 ```powershell

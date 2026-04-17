@@ -157,6 +157,46 @@ def primitive_mesh_from_prompt(prompt: str, device: torch.device) -> Mesh:
     return create_cube_mesh(device)
 
 
+def _sample_face_indices(probabilities: torch.Tensor, num_samples: int) -> torch.Tensor:
+    # torch.multinomial cannot sample from more than 2^24 categories in one
+    # call. Dense COLMAP Poisson meshes can exceed that, so use a hierarchical
+    # chunked draw when needed:
+    # 1. sample a chunk based on chunk mass
+    # 2. sample a face within that chunk
+    max_categories = 1 << 24
+    if probabilities.shape[0] < max_categories:
+        return torch.multinomial(probabilities, num_samples, replacement=True)
+
+    cpu_probabilities = probabilities.detach().cpu()
+    chunk_size = 1 << 20
+    chunk_masses = []
+    chunk_starts = []
+    for start in range(0, cpu_probabilities.shape[0], chunk_size):
+        end = min(start + chunk_size, cpu_probabilities.shape[0])
+        chunk_starts.append(start)
+        chunk_masses.append(cpu_probabilities[start:end].sum())
+
+    chunk_mass_tensor = torch.stack(chunk_masses)
+    chunk_choices = torch.multinomial(chunk_mass_tensor / chunk_mass_tensor.sum().clamp_min(1e-8), num_samples, replacement=True)
+
+    sample_indices = torch.empty(num_samples, dtype=torch.long)
+    for chunk_id in torch.unique(chunk_choices):
+        chunk_id_int = int(chunk_id.item())
+        sample_mask = chunk_choices == chunk_id
+        count = int(sample_mask.sum().item())
+        start = chunk_starts[chunk_id_int]
+        end = min(start + chunk_size, cpu_probabilities.shape[0])
+        local_probabilities = cpu_probabilities[start:end]
+        local_indices = torch.multinomial(
+            local_probabilities / local_probabilities.sum().clamp_min(1e-8),
+            count,
+            replacement=True,
+        )
+        sample_indices[sample_mask] = local_indices + start
+
+    return sample_indices.to(probabilities.device)
+
+
 def sample_surface(mesh: Mesh, num_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
     # Area-weighted triangle sampling gives anchors distributed over the mesh
     # surface without over-focusing on tiny triangles.
@@ -166,14 +206,7 @@ def sample_surface(mesh: Mesh, num_samples: int) -> tuple[torch.Tensor, torch.Te
     cross = torch.cross(edges_a, edges_b, dim=-1)
     areas = 0.5 * cross.norm(dim=-1)
     probabilities = areas / areas.sum().clamp_min(1e-8)
-    # CUDA multinomial has a category-count limit for very large meshes. Dense
-    # COLMAP Poisson meshes can exceed that, so fall back to CPU sampling for
-    # the face-index draw while keeping the chosen triangles on the original
-    # device for the rest of the pipeline.
-    if probabilities.device.type == "cuda" and probabilities.shape[0] >= (1 << 24):
-        face_indices = torch.multinomial(probabilities.detach().cpu(), num_samples, replacement=True).to(mesh.vertices.device)
-    else:
-        face_indices = torch.multinomial(probabilities, num_samples, replacement=True)
+    face_indices = _sample_face_indices(probabilities, num_samples)
 
     chosen_triangles = triangles[face_indices]
     chosen_normals = _normalize(cross[face_indices])
