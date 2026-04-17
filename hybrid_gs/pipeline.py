@@ -219,6 +219,20 @@ def maybe_prepare_mesh_prior(cfg: HybridConfig) -> HybridConfig:
     if not cfg.colmap_model_dir or not cfg.colmap_image_dir:
         return cfg
 
+    # Reuse an already-generated mesh prior automatically before prompting the
+    # user again. This covers the common case where mesh_prior.obj was created
+    # manually in an earlier step and the next run omits --mesh.
+    model_dir = Path(cfg.colmap_model_dir)
+    default_workspace = model_dir.parent / "mesh_prior"
+    workspace = Path(cfg.mesh_workspace) if cfg.mesh_workspace else default_workspace
+    existing_mesh = workspace / "dense" / "mesh_prior.obj"
+    if existing_mesh.exists():
+        cfg.mesh_path = str(existing_mesh)
+        cfg.scene_mode = False
+        print_phase_banner("Check for Mesh Mesh Prior to Compare")
+        print_phase_detail(f"Found existing mesh prior at {existing_mesh}")
+        return cfg
+
     print_phase_banner("Check for Mesh Mesh Prior to Compare")
     print_phase_detail("Checking whether there is mesh prior...")
 
@@ -235,9 +249,6 @@ def maybe_prepare_mesh_prior(cfg: HybridConfig) -> HybridConfig:
 
     # Keep auto-generated dense meshes close to the COLMAP model by default so
     # each dataset keeps its sparse inputs and derived mesh workspace together.
-    model_dir = Path(cfg.colmap_model_dir)
-    default_workspace = model_dir.parent / "mesh_prior"
-    workspace = Path(cfg.mesh_workspace) if cfg.mesh_workspace else default_workspace
     script_path = Path(__file__).resolve().parent.parent / "tools" / "generate_colmap_mesh.ps1"
     command = [
         "powershell",
