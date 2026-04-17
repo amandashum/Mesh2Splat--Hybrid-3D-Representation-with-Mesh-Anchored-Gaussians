@@ -207,7 +207,7 @@ def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
         return
 
     try:
-        response = input("Create interactive viewer HTML now? [y/N] ").strip().lower()
+        response = input("\n\nCreate interactive viewer HTML now? [y/N] ").strip().lower()
     except EOFError:
         return
 
@@ -757,14 +757,14 @@ def optimize(cfg: HybridConfig) -> None:
             f"({completion_mesh_artifacts.patched_edge_count} patched edges)"
         )
         if completion_mesh_artifacts.patch_mesh is not None
-        else "no completion patch mesh was produced",
+        else ">>> no completion patch mesh was produced <<<",
         (
             f"writing merged mesh to {cfg.out_dir / 'mesh_with_completion.obj'} "
             f"and {cfg.out_dir / 'merged_mesh_with_splats.obj'} "
             f"({completion_mesh_artifacts.selected_completion_count} completion points used)"
         )
         if completion_mesh_artifacts.merged_mesh is not None
-        else "no merged completion mesh was produced",
+        else ">>> no merged completion mesh was produced <<<",
         f"writing completion state to {cfg.out_dir / 'completion_state.npz'}",
         f"writing final compatible state to {cfg.out_dir / 'gaussian_state.npz'}",
         "writing completion renders to view_XX_with_completion.png and view_XX_render.png",
