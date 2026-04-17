@@ -155,6 +155,18 @@ holes, increase:
 --lambda-completion-continuity 0.30
 ```
 
+In plain terms, the three Gaussian branches play different roles:
+
+- `anchored`: splats tied closely to the known geometry or reliable sparse scene structure
+- `detail`: splats that refine local appearance and small geometric variation near that known structure
+- `completion`: splats allowed to extend into weakly observed or missing regions so the model can try to fill holes instead of leaving gaps
+
+So the completion branch is the part of the model that tries to infer missing
+surface regions. In mesh mode it now prefers open boundary edges, and in scene
+mode it prefers weakly supported sparse frontier points. It is still a
+plausibility-based fill mechanism, not a guaranteed recovery of true unseen
+geometry.
+
 When the mesh really has open boundaries, watch the log for:
 
 ```text
