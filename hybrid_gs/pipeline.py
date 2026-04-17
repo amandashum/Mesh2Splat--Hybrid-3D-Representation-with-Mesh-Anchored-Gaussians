@@ -163,6 +163,14 @@ def print_phase_banner(title: str) -> None:
     print(f"\n\n{border}\n+     {text}     +\n{border}")
 
 
+def print_phase_detail(*lines: str) -> None:
+    # Follow each export banner with concrete file targets so the user can see
+    # exactly what is being produced and where it will appear in the output
+    # folder.
+    for line in lines:
+        print(line)
+
+
 def maybe_prompt_to_create_viewer(cfg: HybridConfig) -> None:
     # Optional convenience hook so a training run can immediately produce
     # `viewer.html` without making the user remember a second command.
@@ -626,6 +634,12 @@ def optimize(cfg: HybridConfig) -> None:
     # Export both stages explicitly so comparisons do not rely on recomputing
     # states later: mesh-prior-only and the final completion-enhanced result.
     print_phase_banner("Mesh Prior")
+    print_phase_detail(
+        f"writing mesh prior geometry to {cfg.out_dir / 'mesh_prior.obj'}" if mesh is not None else "no explicit mesh prior OBJ to write in scene mode",
+        f"writing mesh-prior point cloud to {cfg.out_dir / 'mesh_prior_cloud.ply'}",
+        f"writing mesh-prior state to {cfg.out_dir / 'mesh_prior_state.npz'}",
+        "writing mesh-prior renders to view_XX_mesh_prior.png",
+    )
     if mesh is not None:
         save_obj_mesh(cfg.out_dir / "mesh_prior.obj", mesh)
     save_gaussian_point_cloud(cfg.out_dir / "mesh_prior_cloud.ply", mesh_prior_state)
@@ -659,6 +673,12 @@ def optimize(cfg: HybridConfig) -> None:
         save_image(cfg.out_dir / f"view_{index:02d}_target.png", target)
 
     print_phase_banner("Completion Using Splats")
+    print_phase_detail(
+        f"writing completion point cloud to {cfg.out_dir / 'with_completion_cloud.ply'}",
+        f"writing completion state to {cfg.out_dir / 'completion_state.npz'}",
+        f"writing final compatible state to {cfg.out_dir / 'gaussian_state.npz'}",
+        "writing completion renders to view_XX_with_completion.png and view_XX_render.png",
+    )
     save_gaussian_point_cloud(cfg.out_dir / "with_completion_cloud.ply", final_state)
     save_gaussian_state(cfg.out_dir / "gaussian_state.npz", final_state)
     save_gaussian_state(cfg.out_dir / "completion_state.npz", final_state)
