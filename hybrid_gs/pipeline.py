@@ -238,13 +238,13 @@ def maybe_prepare_mesh_prior(cfg: HybridConfig) -> HybridConfig:
         if existing_mesh.exists():
             cfg.mesh_path = str(existing_mesh)
             cfg.scene_mode = False
-            print_phase_banner("Check for Mesh Mesh Prior to Compare")
+            print_phase_banner("Check for Mesh Prior to Compare")
             print_phase_detail(f"Found existing mesh prior at path: {existing_mesh}")
             return cfg
 
     workspace = Path(cfg.mesh_workspace) if cfg.mesh_workspace else default_workspace
 
-    print_phase_banner("Check for Mesh Mesh Prior to Compare")
+    print_phase_banner("Check for Mesh Prior to Compare")
     print_phase_detail("Checking whether there is mesh prior...")
 
     try:
