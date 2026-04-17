@@ -1,4 +1,4 @@
-torch
-numpy
-Pillow
-plotly
+numpy>=1.24
+Pillow>=10.0
+plotly>=5.18
+torch>=2.0

@@ -39,6 +39,17 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 python -m pip install -r requirements.txt
 ```
 
+This installs the Python dependencies used by training, comparison tools, and
+the HTML viewer:
+
+- `torch`
+- `numpy`
+- `Pillow`
+- `plotly`
+
+External tools such as `COLMAP` and `MeshLab` are not installed through
+`requirements.txt` and still need to be installed separately.
+
 ## Reactivate the Environment
 
 If you created the virtual environment in this repository and later open a new
