@@ -224,14 +224,25 @@ def maybe_prepare_mesh_prior(cfg: HybridConfig) -> HybridConfig:
     # manually in an earlier step and the next run omits --mesh.
     model_dir = Path(cfg.colmap_model_dir)
     default_workspace = model_dir.parent / "mesh_prior"
+    candidate_workspaces = []
+    if cfg.mesh_workspace:
+        candidate_workspaces.append(Path(cfg.mesh_workspace))
+    candidate_workspaces.append(default_workspace)
+    if model_dir.parent.parent != model_dir.parent:
+        # Some datasets unpack as dataset/dataset/{images,sparse} while the mesh
+        # prior is written to dataset/mesh_prior. Check that common layout too.
+        candidate_workspaces.append(model_dir.parent.parent / "mesh_prior")
+
+    for workspace in candidate_workspaces:
+        existing_mesh = workspace / "dense" / "mesh_prior.obj"
+        if existing_mesh.exists():
+            cfg.mesh_path = str(existing_mesh)
+            cfg.scene_mode = False
+            print_phase_banner("Check for Mesh Mesh Prior to Compare")
+            print_phase_detail(f"Found existing mesh prior at path: {existing_mesh}")
+            return cfg
+
     workspace = Path(cfg.mesh_workspace) if cfg.mesh_workspace else default_workspace
-    existing_mesh = workspace / "dense" / "mesh_prior.obj"
-    if existing_mesh.exists():
-        cfg.mesh_path = str(existing_mesh)
-        cfg.scene_mode = False
-        print_phase_banner("Check for Mesh Mesh Prior to Compare")
-        print_phase_detail(f"Found existing mesh prior at {existing_mesh}")
-        return cfg
 
     print_phase_banner("Check for Mesh Mesh Prior to Compare")
     print_phase_detail("Checking whether there is mesh prior...")
