@@ -16,6 +16,8 @@ from hybrid_gs.camera import orbit_cameras
 from hybrid_gs.colmap import ColmapPointCloud, load_colmap_points3d, load_colmap_text_dataset
 from hybrid_gs.completion import (
     CompletionPrior,
+    CompletionMeshArtifacts,
+    build_completion_patch_mesh,
     build_mesh_completion_prior,
     build_sparse_completion_prior,
     completion_continuity_loss,
@@ -29,6 +31,7 @@ from interactive_splat_viewer import (
 )
 from hybrid_gs.losses import (
     appearance_guidance_loss,
+    completion_region_loss,
     completion_smoothness_loss,
     detail_tether_loss,
     opacity_regularization,
@@ -38,6 +41,7 @@ from hybrid_gs.losses import (
 )
 from hybrid_gs.mesh import Mesh, load_obj_mesh, primitive_mesh_from_prompt, sample_surface
 from hybrid_gs.renderer import render_gaussians
+from hybrid_gs.segmentation import build_semantic_masks
 
 
 @dataclass
@@ -66,6 +70,7 @@ class HybridConfig:
     lambda_detail: float = 0.25
     lambda_completion: float = 0.35
     lambda_completion_continuity: float = 0.20
+    lambda_completion_region: float = 0.35
     lambda_appearance: float = 0.15
     lambda_scale: float = 0.02
     lambda_opacity: float = 0.01
@@ -86,6 +91,13 @@ def save_image(path: Path, image: torch.Tensor) -> None:
     # Save tensor images in a viewer-friendly format for quick comparisons.
     array = (image.detach().cpu().clamp(0.0, 1.0).numpy() * 255.0).astype(np.uint8)
     Image.fromarray(array).save(path)
+
+
+def save_mask_image(path: Path, mask: torch.Tensor) -> None:
+    # Segmentation/debug masks are saved as grayscale images so completion
+    # gating can be inspected directly alongside the rendered outputs.
+    array = (mask.detach().cpu().clamp(0.0, 1.0).numpy() * 255.0).astype(np.uint8)
+    Image.fromarray(array, mode="L").save(path)
 
 
 def save_gaussian_state(path: Path, state: GaussianState) -> None:
@@ -140,6 +152,23 @@ def save_gaussian_point_cloud(path: Path, state: GaussianState) -> None:
                 f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} "
                 f"{int(color[0])} {int(color[1])} {int(color[2])} {int(alpha)}\n"
             )
+
+
+def build_completion_mesh_exports(
+    mesh: Mesh | None,
+    completion_state: GaussianState,
+    completion_normals: torch.Tensor,
+    strategy: str,
+) -> CompletionMeshArtifacts:
+    # The completion branch should affect exported geometry, not just rendered
+    # images. This helper converts the learned completion splats into a simple
+    # patch mesh and merges that patch back into the base mesh when possible.
+    return build_completion_patch_mesh(
+        base_mesh=mesh,
+        completion_state=completion_state,
+        strategy=strategy,
+        completion_normals=completion_normals,
+    )
 
 
 def load_mesh(cfg: HybridConfig) -> Mesh:
@@ -541,8 +570,25 @@ def optimize(cfg: HybridConfig) -> None:
         completion_state = model.completion_state()
 
         reconstruction = torch.zeros((), device=cfg.device)
+        completion_region_penalty = torch.zeros((), device=cfg.device)
         mask_loss = torch.zeros((), device=cfg.device)
         for camera, target in zip(cameras, targets):
+            mesh_prior_render, mesh_prior_alpha = render_gaussians(
+                concat_states(anchored_state, detail_state),
+                camera,
+                tile_size=cfg.render_tile_size,
+                support_scale=cfg.render_support_scale,
+                alpha_threshold=cfg.render_alpha_threshold,
+                return_alpha=True,
+            )
+            completion_render, completion_alpha = render_gaussians(
+                completion_state,
+                camera,
+                tile_size=cfg.render_tile_size,
+                support_scale=cfg.render_support_scale,
+                alpha_threshold=cfg.render_alpha_threshold,
+                return_alpha=True,
+            )
             rendered = render_gaussians(
                 state,
                 camera,
@@ -551,7 +597,14 @@ def optimize(cfg: HybridConfig) -> None:
                 alpha_threshold=cfg.render_alpha_threshold,
             )
             reconstruction = reconstruction + reconstruction_loss(rendered, target)
+            semantic_masks = build_semantic_masks(target, mesh_prior_alpha)
+            completion_region_penalty = completion_region_penalty + completion_region_loss(
+                completion_alpha,
+                semantic_masks["completion_region"],
+                semantic_masks["completion_band"],
+            )
         reconstruction = reconstruction / len(cameras)
+        completion_region_penalty = completion_region_penalty / len(cameras)
 
         if reference_supervision is not None:
             # Use the first orbit camera as the "observed" view and add both RGB and
@@ -599,6 +652,7 @@ def optimize(cfg: HybridConfig) -> None:
             + cfg.lambda_detail * detail
             + cfg.lambda_completion * completion
             + cfg.lambda_completion_continuity * completion_continuity
+            + cfg.lambda_completion_region * completion_region_penalty
             + cfg.lambda_appearance * appearance
             + cfg.lambda_scale * scale_penalty
             + cfg.lambda_opacity * opacity_penalty
@@ -624,6 +678,7 @@ def optimize(cfg: HybridConfig) -> None:
                 f"detail={detail.item():.4f} "
                 f"completion={completion.item():.4f} "
                 f"continuity={completion_continuity.item():.4f} "
+                f"region={completion_region_penalty.item():.4f} "
                 f"appearance={appearance.item():.4f} "
                 f"mask={mask_loss.item():.4f}"
             )
@@ -655,13 +710,15 @@ def optimize(cfg: HybridConfig) -> None:
         },
     )
     for index, (camera, target) in enumerate(zip(cameras, targets)):
-        mesh_prior_render = render_gaussians(
+        mesh_prior_render, mesh_prior_alpha = render_gaussians(
             mesh_prior_state,
             camera,
             tile_size=cfg.render_tile_size,
             support_scale=cfg.render_support_scale,
             alpha_threshold=cfg.render_alpha_threshold,
+            return_alpha=True,
         )
+        semantic_masks = build_semantic_masks(target, mesh_prior_alpha)
         rendered = render_gaussians(
             final_state,
             camera,
@@ -671,15 +728,43 @@ def optimize(cfg: HybridConfig) -> None:
         )
         save_image(cfg.out_dir / f"view_{index:02d}_mesh_prior.png", mesh_prior_render)
         save_image(cfg.out_dir / f"view_{index:02d}_target.png", target)
+        save_mask_image(cfg.out_dir / f"view_{index:02d}_completion_region_mask.png", semantic_masks["completion_region"])
+        save_mask_image(cfg.out_dir / f"view_{index:02d}_building_core_mask.png", semantic_masks["building_core"])
 
     print_phase_banner("Completion Using Splats")
+    completion_mesh_artifacts = build_completion_mesh_exports(
+        mesh=mesh,
+        completion_state=completion_state,
+        completion_normals=model.completion_seed_normals,
+        strategy=completion_prior.strategy,
+    )
     print_phase_detail(
         f"writing completion point cloud to {cfg.out_dir / 'with_completion_cloud.ply'}",
+        (
+            f"writing completion patch mesh to {cfg.out_dir / 'completion_patch.obj'} "
+            f"and {cfg.out_dir / 'missing_mesh_parts.obj'} "
+            f"({completion_mesh_artifacts.patched_edge_count} patched edges)"
+        )
+        if completion_mesh_artifacts.patch_mesh is not None
+        else "no completion patch mesh was produced",
+        (
+            f"writing merged mesh to {cfg.out_dir / 'mesh_with_completion.obj'} "
+            f"and {cfg.out_dir / 'merged_mesh_with_splats.obj'} "
+            f"({completion_mesh_artifacts.selected_completion_count} completion points used)"
+        )
+        if completion_mesh_artifacts.merged_mesh is not None
+        else "no merged completion mesh was produced",
         f"writing completion state to {cfg.out_dir / 'completion_state.npz'}",
         f"writing final compatible state to {cfg.out_dir / 'gaussian_state.npz'}",
         "writing completion renders to view_XX_with_completion.png and view_XX_render.png",
     )
     save_gaussian_point_cloud(cfg.out_dir / "with_completion_cloud.ply", final_state)
+    if completion_mesh_artifacts.patch_mesh is not None:
+        save_obj_mesh(cfg.out_dir / "completion_patch.obj", completion_mesh_artifacts.patch_mesh)
+        save_obj_mesh(cfg.out_dir / "missing_mesh_parts.obj", completion_mesh_artifacts.patch_mesh)
+    if completion_mesh_artifacts.merged_mesh is not None:
+        save_obj_mesh(cfg.out_dir / "mesh_with_completion.obj", completion_mesh_artifacts.merged_mesh)
+        save_obj_mesh(cfg.out_dir / "merged_mesh_with_splats.obj", completion_mesh_artifacts.merged_mesh)
     save_gaussian_state(cfg.out_dir / "gaussian_state.npz", final_state)
     save_gaussian_state(cfg.out_dir / "completion_state.npz", final_state)
     for index, (camera, _) in enumerate(zip(cameras, targets)):
@@ -763,6 +848,12 @@ def parse_args() -> HybridConfig:
         default=0.20,
         help="Weight for the completion continuity loss that keeps hole-filling splats coherent.",
     )
+    parser.add_argument(
+        "--lambda-completion-region",
+        type=float,
+        default=0.35,
+        help="Weight for the structure-aware completion region loss that keeps completion near plausible building gaps.",
+    )
     parser.add_argument("--num-detail-splats", type=int, default=192, help="Residual detail splats kept close to the mesh surface.")
     parser.add_argument("--num-completion-splats", type=int, default=128, help="Additional weakly constrained splats used to fill missing regions.")
     parser.add_argument("--max-sparse-points", type=int, default=12000, help="Maximum sparse COLMAP points kept when scene mode is enabled.")
@@ -807,6 +898,7 @@ def parse_args() -> HybridConfig:
         lambda_detail=args.lambda_detail,
         lambda_completion=args.lambda_completion,
         lambda_completion_continuity=args.lambda_completion_continuity,
+        lambda_completion_region=args.lambda_completion_region,
         num_detail_splats=args.num_detail_splats,
         num_completion_splats=args.num_completion_splats,
         max_sparse_points=args.max_sparse_points,

@@ -75,3 +75,18 @@ def scale_regularization(scales: torch.Tensor) -> torch.Tensor:
 def opacity_regularization(opacity: torch.Tensor) -> torch.Tensor:
     # Encourage opacity values away from the ambiguous 0.5 region.
     return torch.mean(opacity * (1.0 - opacity))
+
+
+def completion_region_loss(
+    completion_alpha: torch.Tensor,
+    allowed_region: torch.Tensor,
+    focus_region: torch.Tensor,
+    outside_weight: float = 1.0,
+    inside_weight: float = 0.25,
+) -> torch.Tensor:
+    # A purely photometric completion branch will happily grow into roofs,
+    # sky, ground, or vegetation if that helps the image loss a bit. This
+    # region loss keeps completion concentrated near plausible building gaps.
+    outside_penalty = completion_alpha * (1.0 - allowed_region)
+    inside_penalty = (1.0 - completion_alpha) * focus_region
+    return outside_weight * outside_penalty.mean() + inside_weight * inside_penalty.mean()

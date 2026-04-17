@@ -8,11 +8,14 @@ This package isolates the missing-region logic from the rest of the pipeline:
 """
 
 from .losses import completion_continuity_loss
+from .meshing import CompletionMeshArtifacts, build_completion_patch_mesh
 from .seeding import CompletionPrior, build_mesh_completion_prior, build_sparse_completion_prior
 
 __all__ = [
     "CompletionPrior",
+    "CompletionMeshArtifacts",
     "build_mesh_completion_prior",
     "build_sparse_completion_prior",
+    "build_completion_patch_mesh",
     "completion_continuity_loss",
 ]

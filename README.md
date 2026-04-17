@@ -13,6 +13,7 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
 - `main.py`: entrypoint
 - `hybrid_gs/`: core mesh, camera, Gaussian, renderer, loss, and optimization code
 - `hybrid_gs/completion/`: completion-specific seeding and continuity losses for missing regions
+- `hybrid_gs/segmentation.py`: heuristic structure-aware masks that keep completion near plausible building regions
 - `interactive_splat_viewer.py`: optional HTML viewer for saved Gaussian states
 - `COLMAP_SETUP.md`: Windows-oriented COLMAP setup notes for multi-view reconstruction
 - `tools/run_colmap.ps1`: helper script for a standard COLMAP sparse pipeline
@@ -28,7 +29,7 @@ The repository is intentionally scoped to the core hybrid baseline. Side experim
    logic can evolve independently of mesh loading and rendering.
 4. Initialize anchored, detail, and completion Gaussian branches
 5. Optimize Gaussian parameters with reconstruction, tether, completion,
-   completion-continuity, appearance, scale, and opacity losses
+   completion-continuity, completion-region, appearance, scale, and opacity losses
 6. Save rendered views plus separate mesh-prior and with-completion artifacts
    for inspection
 
@@ -125,6 +126,7 @@ Useful controls:
 - `--max-sparse-points`: cap the sparse COLMAP point cloud used in scene mode
 - `--prompt-viewer`: ask at the end of training whether to generate `viewer.html`
 - `--lambda-completion-continuity`: strengthen the new hole-filling continuity loss for completion splats
+- `--lambda-completion-region`: strengthen the structure-aware mask loss that keeps completion near plausible building gaps
 - `--steps`: optimization length
 - `--cpu`: force CPU execution
 
@@ -133,10 +135,14 @@ Each run now writes two explicit stages into the output folder:
 - `mesh_prior.obj`: the normalized mesh prior actually used by training
 - `mesh_prior_cloud.ply`: Gaussian centers before completion is applied
 - `with_completion_cloud.ply`: Gaussian centers after completion learning
+- `missing_mesh_parts.obj`: completion patch mesh built from learned splats near hole boundaries, when one can be formed
+- `merged_mesh_with_splats.obj`: attempted merged mesh that appends the completion patch back onto the mesh prior
 - `mesh_prior_state.npz`: saved Gaussian state before completion
 - `completion_state.npz`: saved Gaussian state after completion
 - `view_XX_mesh_prior.png`: render from the mesh-prior-only state
 - `view_XX_with_completion.png`: render from the final completed state
+- `view_XX_completion_region_mask.png`: heuristic mask showing where completion is allowed to grow
+- `view_XX_building_core_mask.png`: conservative mask for the current building-supported silhouette
 
 ## Completion package
 
@@ -175,6 +181,23 @@ completion seeds: mesh_boundary_bridge
 
 That indicates the completion branch is being initialized from mesh-hole
 boundaries rather than generic fallback surface samples.
+
+## Structure-aware segmentation
+
+This repository does not ship a learned semantic segmenter. Instead, it now
+uses a pragmatic structure-aware segmentation pass in `hybrid_gs/segmentation.py`:
+
+- the current mesh-prior silhouette marks the building core
+- that silhouette is dilated to create a near-building completion context
+- simple color heuristics identify likely vegetation and sky
+- completion is encouraged to stay inside the building context and discouraged
+  from expanding into sky, ground, or distant vegetation
+
+This is meant to make completion more semantically logical for cases like:
+
+- filling wall gaps near bushes
+- avoiding giant roof closures
+- avoiding random floating completion far from the building
 
 ## COLMAP workflow
 
