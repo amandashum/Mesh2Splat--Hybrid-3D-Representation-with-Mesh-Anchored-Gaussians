@@ -223,6 +223,7 @@ def load_colmap_points3d(
 
     centered = xyz - xyz.mean(dim=0, keepdim=True)
     scale = centered.norm(dim=-1).amax().clamp_min(1e-6)
+    
     # Normalize the point cloud so scenes of very different real-world scales
     # behave similarly under the same default splat sizes and loss weights.
     xyz = centered / scale

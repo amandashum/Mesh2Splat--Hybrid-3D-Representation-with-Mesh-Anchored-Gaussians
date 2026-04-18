@@ -98,16 +98,19 @@ def render_gaussians(
     # scene-mode runs with many real views.
     image_rows: list[torch.Tensor] = []
     alpha_rows: list[torch.Tensor] = []
+
     # Process image in tiles (rows of tiles)
     for top in range(0, image_height, effective_tile_size):
         bottom = min(top + effective_tile_size, image_height)
         tile_ys = torch.arange(top, bottom, device=device, dtype=torch.float32)
         row_images: list[torch.Tensor] = []
         row_alphas: list[torch.Tensor] = []
+
         # Process each tile in the current row
         for left in range(0, image_width, effective_tile_size):
             right = min(left + effective_tile_size, image_width)
             tile_xs = torch.arange(left, right, device=device, dtype=torch.float32)
+
             # Create coordinate grids for the current tile
             grid_y, grid_x = torch.meshgrid(tile_ys, tile_xs, indexing="ij")
 
@@ -154,17 +157,23 @@ def render_gaussians(
                 # Calculate distance from each pixel in the tile to the Gaussian center
                 dx = grid_x - tile_projected_x[index]
                 dy = grid_y - tile_projected_y[index]
+
                 # Compute squared normalized distance for Gaussian falloff
                 dist2 = (dx * dx + dy * dy) / (tile_sigma[index] * tile_sigma[index] + 1e-6)
+
                 # Compute alpha (opacity) using Gaussian function
                 alpha = tile_opacity[index, 0] * torch.exp(-0.5 * dist2)
+
                 # Skip Gaussians with negligible contribution
                 if torch.amax(alpha) < alpha_threshold:
                     continue
+
                 # Clamp alpha to avoid numerical issues and add channel dimension
                 alpha = alpha.clamp(0.0, 0.98).unsqueeze(-1)
+
                 # Alpha blend: composite Gaussian color with existing tile color
                 tile_image = tile_image * (1.0 - alpha) + tile_colors[index].view(1, 1, 3) * alpha
+                
                 # Update alpha channel using over-compositing
                 tile_alpha = tile_alpha + (1.0 - tile_alpha) * alpha[..., 0]
 
