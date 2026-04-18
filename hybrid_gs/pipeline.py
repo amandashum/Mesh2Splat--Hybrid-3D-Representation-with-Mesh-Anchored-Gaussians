@@ -43,6 +43,7 @@ from hybrid_gs.losses import (
 )
 from hybrid_gs.mesh import Mesh, load_obj_mesh, primitive_mesh_from_prompt, sample_surface
 from hybrid_gs.renderer import render_gaussians
+from hybrid_gs.sam_masks import generate_sam_masks_for_paths
 from hybrid_gs.segmentation import build_scene_structure_masks
 
 
@@ -57,6 +58,9 @@ class HybridConfig:
     scene_mode: bool
     reference_image_path: str | None
     reference_mask_path: str | None
+    sam_checkpoint_path: str | None
+    sam_model_type: str | None
+    sam_device: str | None
     out_dir: Path
     num_splats: int
     steps: int
@@ -192,8 +196,9 @@ def print_phase_banner(title: str) -> None:
     # Large scene runs are easier to follow when the log clearly marks the
     # structural prior stage and the later completion-learning stage.
     text = title.strip()
-    border = "+" * max(len(text) + 12, 23)
-    print(f"\n\n{border}\n+     {text}     +\n{border}")
+    inner_width = max(len(text) + 10, 21)
+    border = "+" * (inner_width + 2)
+    print(f"\n\n{border}\n+{text.center(inner_width)}+\n{border}")
 
 
 def print_phase_detail(*lines: str) -> None:
@@ -368,7 +373,7 @@ def build_palette_colors(points: torch.Tensor, normals: torch.Tensor, palette: t
     return (mixed + tint).clamp(0.02, 0.98)
 
 
-def load_training_views(cfg: HybridConfig, mesh: Mesh) -> tuple[list, list[torch.Tensor], str]:
+def load_training_views(cfg: HybridConfig, mesh: Mesh) -> tuple[list, list[torch.Tensor], str, list[Path] | None]:
     # Switch between real COLMAP supervision and synthetic fallback views. The
     # rest of the optimizer only sees `(camera, target)` pairs either way.
     if cfg.colmap_model_dir and cfg.colmap_image_dir:
@@ -381,7 +386,7 @@ def load_training_views(cfg: HybridConfig, mesh: Mesh) -> tuple[list, list[torch
         )
         if not views:
             raise ValueError("No COLMAP views were loaded.")
-        return [view.camera for view in views], [view.target for view in views], "colmap"
+        return [view.camera for view in views], [view.target for view in views], "colmap", [view.image_path for view in views]
 
     cameras = orbit_cameras(
         num_views=cfg.num_views,
@@ -392,7 +397,37 @@ def load_training_views(cfg: HybridConfig, mesh: Mesh) -> tuple[list, list[torch
         fov_degrees=45.0,
         device=cfg.device,
     )
-    return cameras, build_proxy_targets(mesh, cameras, cfg.prompt, cfg.image_size), "synthetic"
+    return cameras, build_proxy_targets(mesh, cameras, cfg.prompt, cfg.image_size), "synthetic", None
+
+
+def maybe_build_sam_masks(
+    cfg: HybridConfig,
+    image_paths: list[Path] | None,
+    targets: list[torch.Tensor],
+) -> list[torch.Tensor] | None:
+    # SAM masks are optional semantic guidance. When enabled, generate one
+    # foreground/surface mask per COLMAP image and keep them aligned with the
+    # same resized training targets used by the optimizer.
+    if not cfg.sam_checkpoint_path or not image_paths:
+        return None
+
+    if cfg.sam_model_type is None:
+        raise ValueError("SAM integration requires --sam-model-type when --sam-checkpoint is provided.")
+
+    output_shapes = [(int(target.shape[0]), int(target.shape[1])) for target in targets]
+    device_name = cfg.sam_device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(
+        f"Generating SAM masks with model '{cfg.sam_model_type}' on {device_name} "
+        f"for {len(image_paths)} view(s)..."
+    )
+    masks = generate_sam_masks_for_paths(
+        image_paths=image_paths,
+        output_shapes=output_shapes,
+        checkpoint_path=cfg.sam_checkpoint_path,
+        model_type=cfg.sam_model_type,
+        device_name=device_name,
+    )
+    return [mask.to(cfg.device) for mask in masks]
 
 
 def estimate_point_normals(points: torch.Tensor, cameras: list) -> torch.Tensor:
@@ -611,7 +646,8 @@ def optimize(cfg: HybridConfig) -> None:
     # Real datasets may skip meshes entirely, so use a primitive only as a
     # synthetic fallback for the target-view loader.
     fallback_mesh = load_mesh(cfg) if not (cfg.scene_mode and cfg.colmap_model_dir) else primitive_mesh_from_prompt(cfg.prompt, cfg.device)
-    cameras, targets, view_source = load_training_views(cfg, fallback_mesh)
+    cameras, targets, view_source, image_paths = load_training_views(cfg, fallback_mesh)
+    sam_masks = maybe_build_sam_masks(cfg, image_paths, targets)
     (
         mesh,
         anchors,
@@ -661,7 +697,8 @@ def optimize(cfg: HybridConfig) -> None:
         reconstruction = torch.zeros((), device=cfg.device)
         completion_region_penalty = torch.zeros((), device=cfg.device)
         mask_loss = torch.zeros((), device=cfg.device)
-        for camera, target in zip(cameras, targets):
+        view_sam_masks = sam_masks if sam_masks is not None else [None] * len(cameras)
+        for camera, target, sam_mask in zip(cameras, targets, view_sam_masks):
             # Render the known-surface branches separately so the scene-general
             # structure masks can reason about "what the current geometry
             # already explains" versus "what only the completion branch is
@@ -693,7 +730,7 @@ def optimize(cfg: HybridConfig) -> None:
             # The scene-structure masks steer completion toward plausible
             # continuation zones without assuming the scene is specifically a
             # building. This is the current semantic/structural gating layer.
-            scene_masks = build_scene_structure_masks(target, mesh_prior_render, mesh_prior_alpha)
+            scene_masks = build_scene_structure_masks(target, mesh_prior_render, mesh_prior_alpha, sam_mask=sam_mask)
             completion_region_penalty = completion_region_penalty + completion_region_loss(
                 completion_alpha,
                 scene_masks["completion_allowed"],
@@ -805,7 +842,8 @@ def optimize(cfg: HybridConfig) -> None:
             "completion_seed_strategy": completion_prior.strategy,
         },
     )
-    for index, (camera, target) in enumerate(zip(cameras, targets)):
+    view_sam_masks = sam_masks if sam_masks is not None else [None] * len(cameras)
+    for index, (camera, target, sam_mask) in enumerate(zip(cameras, targets, view_sam_masks)):
         mesh_prior_render, mesh_prior_alpha = render_gaussians(
             mesh_prior_state,
             camera,
@@ -814,7 +852,7 @@ def optimize(cfg: HybridConfig) -> None:
             alpha_threshold=cfg.render_alpha_threshold,
             return_alpha=True,
         )
-        scene_masks = build_scene_structure_masks(target, mesh_prior_render, mesh_prior_alpha)
+        scene_masks = build_scene_structure_masks(target, mesh_prior_render, mesh_prior_alpha, sam_mask=sam_mask)
         rendered = render_gaussians(
             final_state,
             camera,
@@ -830,6 +868,8 @@ def optimize(cfg: HybridConfig) -> None:
         save_mask_image(cfg.out_dir / f"view_{index:02d}_completion_region_mask.png", scene_masks["completion_allowed"])
         save_mask_image(cfg.out_dir / f"view_{index:02d}_surface_core_mask.png", scene_masks["surface_core"])
         save_mask_image(cfg.out_dir / f"view_{index:02d}_occluder_mask.png", scene_masks["occluder"])
+        if sam_mask is not None:
+            save_mask_image(cfg.out_dir / f"view_{index:02d}_sam_mask.png", scene_masks["sam_foreground"])
 
     print_phase_banner("Completion Using Splats")
     completion_mesh_artifacts = build_completion_mesh_exports(
@@ -916,6 +956,22 @@ def parse_args() -> HybridConfig:
     )
     parser.add_argument("--reference-image", dest="reference_image_path", default=None, help="Optional real RGB image used to supervise the front view.")
     parser.add_argument("--reference-mask", dest="reference_mask_path", default=None, help="Optional mask aligned with --reference-image for silhouette supervision.")
+    parser.add_argument(
+        "--sam-checkpoint",
+        dest="sam_checkpoint_path",
+        default=None,
+        help="Optional SAM checkpoint used to generate foreground masks for completion gating.",
+    )
+    parser.add_argument(
+        "--sam-model-type",
+        default=None,
+        help="SAM model type such as vit_b, vit_l, or vit_h. Required with --sam-checkpoint.",
+    )
+    parser.add_argument(
+        "--sam-device",
+        default=None,
+        help="Optional device for SAM mask generation, for example cuda or cpu.",
+    )
     parser.add_argument("--out-dir", default="outputs/demo", help="Directory for rendered outputs.")
     parser.add_argument("--num-splats", type=int, default=384, help="Number of anchored Gaussian splats.")
     parser.add_argument("--steps", type=int, default=200, help="Optimization steps.")
@@ -996,6 +1052,9 @@ def parse_args() -> HybridConfig:
         scene_mode=args.scene_mode,
         reference_image_path=args.reference_image_path,
         reference_mask_path=args.reference_mask_path,
+        sam_checkpoint_path=args.sam_checkpoint_path,
+        sam_model_type=args.sam_model_type,
+        sam_device=args.sam_device,
         out_dir=Path(args.out_dir),
         num_splats=args.num_splats,
         steps=args.steps,

@@ -130,6 +130,11 @@ the HTML viewer:
 External tools such as `COLMAP` and `MeshLab` are not installed through
 `requirements.txt` and still need to be installed separately.
 
+Optional SAM support is also external to `requirements.txt`. If you want to use
+Segment Anything masks for completion gating, install the official
+`segment_anything` package from Meta's repository and download a matching SAM
+checkpoint, then pass that checkpoint path to `--sam-checkpoint`.
+
 ## Reactivate the Environment
 
 If you created the virtual environment in this repository and later open a new
@@ -307,6 +312,9 @@ Useful controls:
 - `--colmap-model-dir`: folder with `cameras.txt` and `images.txt`
 - `--colmap-image-dir`: folder containing the original or undistorted images
 - `--mesh-workspace`: optional output directory for the auto-generated mesh-prior workspace
+- `--sam-checkpoint`: optional SAM checkpoint used to generate per-view foreground masks
+- `--sam-model-type`: SAM backbone name such as `vit_b`, `vit_l`, or `vit_h`
+- `--sam-device`: optional device override for SAM mask generation
 - `--colmap-resize-long-edge`: downscale cap for COLMAP images during training
 - `--render-tile-size`: split rendering into smaller image tiles to reduce GPU memory use
 - `--render-support-scale`: shrink or expand how far each splat influences a tile in screen space
@@ -385,6 +393,32 @@ now uses a scene-general structure pass in `hybrid_gs/segmentation.py`:
 - completion is encouraged to stay near plausible surface continuation regions
   and discouraged from expanding into obvious background or unsupported lower
   image regions
+
+### Optional SAM masks
+
+If you want stronger semantic gating than the built-in heuristic masks, you can
+optionally add Segment Anything (SAM). In that mode:
+
+- the pipeline runs SAM once per COLMAP image
+- it selects one broad foreground/surface mask per view
+- that SAM mask is merged with the existing scene-structure heuristic
+- completion is then restricted more strongly to the segmented foreground
+  region and its immediate continuation band
+
+SAM does not directly create 3D geometry. It improves the question of
+"where is completion allowed to happen?" so splats are less likely to leak into
+clear background or unrelated clutter.
+
+Gerrard Hall example with SAM enabled:
+
+```cmd
+python .\main.py --colmap-bat C:\tools\COLMAP\COLMAP.bat --colmap-model-dir C:\mesh2splat\data\room\images\gerrard-hall\sparse --colmap-image-dir C:\mesh2splat\data\room\images\gerrard-hall\images --sam-checkpoint C:\models\sam_vit_b_01ec64.pth --sam-model-type vit_b --prompt building --num-views 6 --num-splats 900 --num-detail-splats 550 --num-completion-splats 300 --steps 120 --colmap-resize-long-edge 128 --render-tile-size 48 --render-support-scale 1.75 --render-alpha-threshold 0.002 --lambda-completion-continuity 0.30 --lambda-completion-region 0.45 --prompt-viewer --out-dir C:\mesh2splat\outputs\gerrard_hall_mesh_completion_sam
+```
+
+When SAM is enabled, the output folder also includes:
+
+- `view_XX_sam_mask.png`: the SAM-selected foreground/surface mask used to
+  refine completion gating
 
 This is meant to make completion more scene-general, for cases like:
 

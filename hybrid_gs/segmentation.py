@@ -47,6 +47,7 @@ def build_scene_structure_masks(
     prior_render: torch.Tensor,
     prior_alpha: torch.Tensor,
     *,
+    sam_mask: torch.Tensor | None = None,
     dilation_radius: int = 10,
 ) -> dict[str, torch.Tensor]:
     # This is a scene-general structure pass, not a semantic classifier. It
@@ -106,6 +107,21 @@ def build_scene_structure_masks(
     completion_allowed = torch.clamp(surface_context * (1.0 - clear_background), 0.0, 1.0)
     completion_focus = torch.clamp(near_surface_band + 0.75 * occluder - lower_support, 0.0, 1.0)
 
+    if sam_mask is not None:
+        # SAM is used as a stronger 2D semantic prior for "this is likely the
+        # foreground surface/object region". It does not define 3D geometry by
+        # itself, but it can stop completion from leaking into obvious
+        # background while still allowing the near-surface continuation zone to
+        # expand around the segmented region.
+        sam_foreground = (sam_mask.to(target.device) > 0.5).float()
+        sam_context = dilate_mask(sam_foreground, max(dilation_radius // 2, 4))
+        surface_core = torch.maximum(surface_core, sam_foreground)
+        surface_context = torch.maximum(surface_context, sam_context)
+        near_surface_band = torch.clamp(surface_context - surface_core, 0.0, 1.0)
+        clear_background = torch.maximum(clear_background, 1.0 - sam_context)
+        completion_allowed = torch.clamp(completion_allowed * sam_context, 0.0, 1.0)
+        completion_focus = torch.clamp(torch.maximum(completion_focus * sam_context, 0.75 * occluder * sam_context), 0.0, 1.0)
+
     return {
         "surface_core": surface_core,
         "surface_context": surface_context,
@@ -115,4 +131,5 @@ def build_scene_structure_masks(
         "lower_support": lower_support,
         "completion_allowed": completion_allowed,
         "completion_focus": completion_focus,
+        "sam_foreground": sam_mask.to(target.device) if sam_mask is not None else torch.zeros_like(surface_core),
     }
