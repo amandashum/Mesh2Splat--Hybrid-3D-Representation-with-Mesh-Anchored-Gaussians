@@ -420,13 +420,29 @@ def maybe_build_sam_masks(
         f"Generating SAM masks with model '{cfg.sam_model_type}' on {device_name} "
         f"for {len(image_paths)} view(s)..."
     )
-    masks = generate_sam_masks_for_paths(
-        image_paths=image_paths,
-        output_shapes=output_shapes,
-        checkpoint_path=cfg.sam_checkpoint_path,
-        model_type=cfg.sam_model_type,
-        device_name=device_name,
-    )
+    try:
+        masks = generate_sam_masks_for_paths(
+            image_paths=image_paths,
+            output_shapes=output_shapes,
+            checkpoint_path=cfg.sam_checkpoint_path,
+            model_type=cfg.sam_model_type,
+            device_name=device_name,
+        )
+    except torch.OutOfMemoryError:
+        if device_name != "cuda":
+            raise
+        # Keep the main reconstruction on GPU, but retry the optional SAM
+        # segmentation stage on CPU if the mask generator exhausts VRAM.
+        print(">>> SAM mask generation ran out of CUDA memory; retrying on cpu <<<")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        masks = generate_sam_masks_for_paths(
+            image_paths=image_paths,
+            output_shapes=output_shapes,
+            checkpoint_path=cfg.sam_checkpoint_path,
+            model_type=cfg.sam_model_type,
+            device_name="cpu",
+        )
     return [mask.to(cfg.device) for mask in masks]
 
 
